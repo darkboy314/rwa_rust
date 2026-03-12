@@ -32,7 +32,6 @@ impl GA {
 
         // Generate initial population
         let mut population = self.generate_random_population(&mut rng, p_range);
-        let mut scores = Vec::new();
 
         // Evolution loop
         for _gen in 0..self.generation_count {
@@ -44,7 +43,7 @@ impl GA {
 
             // Combine and evaluate
             population.extend(offspring);
-            scores = self.evaluate(&population, &obj_func, penalty_func.as_ref(), p_range);
+            let scores = self.evaluate(&population, &obj_func, penalty_func.as_ref(), p_range);
 
             // Select best individuals
             population = self.filter(&population, &scores, self.pop_size);

@@ -2,6 +2,9 @@
 /// Stage 1: Upstream player (energy storage provider)
 /// Stage 2: Stage One players (renewable energy generators)  
 /// Stage 3: Stage Two players (electricity offtakers)
+use argmin::core::{CostFunction, Error, Executor, Problem, SyncAlias};
+use argmin::solver::brent::BrentOpt;
+use rayon::result;
 
 const T: f64 = 10.0; // Lifespan years
 const Q: f64 = 600.0; // Storage capacity (MWh)
@@ -53,17 +56,6 @@ impl StageOnePlayer {
         StageOnePlayer { m, b, lbd }
     }
 
-    /// Maximum feasible market share given upstream price.
-    /// This is simply solving `constraint(up, m) == 0` for `m`.
-    pub fn max_m(&self, up: &UpstreamPlayer) -> f64 {
-        // note: if p1 is zero we avoid division by zero by returning infinity
-        if up.p1 == 0.0 {
-            f64::INFINITY
-        } else {
-            ((self.b - C_T) / up.p1).max(0.0)
-        }
-    }
-
     /// Profit function for stage one player
     pub fn theta(&self, up: &UpstreamPlayer, params: &GameParams, m2: f64, m_all: &[f64]) -> f64 {
         let m1 = m_all.iter().sum::<f64>() + 1e-10;
@@ -92,15 +84,6 @@ impl StageOnePlayer {
 impl StageTwoPlayer {
     pub fn new(m: f64, b: f64, gma: f64) -> Self {
         StageTwoPlayer { m, b, gma }
-    }
-
-    /// Maximum feasible market share given upstream price.
-    pub fn max_m(&self, up: &UpstreamPlayer) -> f64 {
-        if up.p2 == 0.0 {
-            f64::INFINITY
-        } else {
-            ((self.b - C_T) / up.p2).max(0.0)
-        }
     }
 
     /// Profit function for stage two player
@@ -168,8 +151,8 @@ impl UpstreamPlayer {
         (1.0 - r) * (p2 * m2 - T * e_cf * q) - C_T * self.n_of as f64
     }
 
-    pub fn cons_3(&self, p2: f64) -> f64 {
-        F - p2
+    pub fn cons_3(&self, q: f64, p2: f64, m2: f64) -> f64 {
+        F * q - p2 * m2
     }
 
     pub fn cons_4(&self, r: f64) -> f64 {
@@ -181,88 +164,44 @@ impl UpstreamPlayer {
     }
 }
 
-use argmin::core::{Error, Executor, Operator, State};
-use argmin::solver::goldensectionsearch::GoldenSectionSearch;
+struct ClosureFunc<F>(F);
 
-/// Wrapper that combines objective and constraint for `argmin`.
-struct Constrained1D<F, C> {
-    objective: F,
-    constraint: C,
-}
-
-impl<F, C> Operator for Constrained1D<F, C>
+impl<F> CostFunction for ClosureFunc<F>
 where
-    F: Fn(f64) -> f64 + Clone + Send + Sync,
-    C: Fn(f64) -> f64 + Clone + Send + Sync,
+    F: Fn(f64) -> f64 + Send + Sync + 'static,
 {
     type Param = f64;
     type Output = f64;
 
-    fn apply(&self, x: &Self::Param) -> Result<Self::Output, Error> {
-        let feas = (self.constraint)(*x);
-        if feas < 0.0 {
-            Ok(f64::INFINITY)
-        } else {
-            Ok((self.objective)(*x))
-        }
-    }
-}
-
-// implement CostFunction so solver can use our operator
-impl<F, C> argmin::core::CostFunction for Constrained1D<F, C>
-where
-    F: Fn(f64) -> f64 + Clone + Send + Sync,
-    C: Fn(f64) -> f64 + Clone + Send + Sync,
-{
-    type Param = f64;
-    type Output = f64;
-
-    fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
-        // Delegate to `Operator` implementation
-        self.apply(p)
+    fn cost(&self, x: &Self::Param) -> Result<Self::Output, Error> {
+        Ok(self.0(*x))
     }
 }
 
 /// Constrained 1‑D optimization using `argmin`.
 /// now leverages GoldenSectionSearch with explicit bounds.
 pub fn alter_best_response<F, C>(
-    objective: F,
+    f: F,
     constraint: C,
     x0: f64,
     lb: f64,
     ub: f64,
     tol: f64,
     max_iter: usize,
-) -> f64
+) -> Result<f64, Error>
 where
-    F: Fn(f64) -> f64 + Clone + Send + Sync,
-    C: Fn(f64) -> f64 + Clone + Send + Sync,
+    F: Fn(f64) -> f64,
+    C: Fn(f64) -> f64,
 {
-    // Prepare operator (captures closures by value, so callers may use `move` if
-    // their closures borrow local data).
-    let op = Constrained1D {
-        objective,
-        constraint,
-    };
+    let problem = Problem::new(ClosureFunc(f));
+    let solver = BrentOpt::new(lb, ub);
 
-    // starting parameter clipped to bounds
-    let init = x0.max(lb).min(ub);
+    let res = Executor::new(ClosureFunc(f), solver)
+    .param()
+    .max_iters(max_iter).
+    .run()?;
 
-    // configure solver, unwrap result of new() since bounds are assumed valid
-    let solver = GoldenSectionSearch::new(lb, ub)
-        .unwrap()
-        .with_tolerance(tol)
-        .unwrap();
-
-    // run optimization using Executor; provide initial guess and iteration limit
-    let res = Executor::new(op, solver)
-        .configure(|state: argmin::core::IterState<f64, (), (), (), (), f64>| {
-            state.param(init).max_iters(max_iter as u64)
-        })
-        .run()
-        .expect("optimizer failed");
-
-    *res.state.get_param().unwrap()
+    Ok(*res.state().best_param().unwarp())
 }
 
 /// Penalty function for genetic algorithm
@@ -278,10 +217,10 @@ pub fn penalty_function(
     let p1 = x[2];
     let p2 = x[3];
 
-    -1e10
+    -1e100
         * (up.cons_1(q, p1, m1).min(0.0)
             + up.cons_2(q, r, p2, m2, params.e_cf).min(0.0)
-            + up.cons_3(p2).min(0.0)
+            + up.cons_3(q, p2, m2).min(0.0)
             + up.cons_4(r).min(0.0)
             + up.cons_5(q, p2, m2, params.e_cf).min(0.0))
 }
@@ -318,18 +257,12 @@ pub fn start_game(
     };
 
     // Initialize players
-    let mut reg1 = StageOnePlayer::new(50.0, 1000.0, 0.4);
-    let mut reg2 = StageOnePlayer::new(50.0, 1000.0, 0.6);
-    let mut oft1 = StageTwoPlayer::new(50.0, 1000.0, 0.3);
-    let mut oft2 = StageTwoPlayer::new(50.0, 1000.0, 0.7);
+    let mut reg1 = StageOnePlayer::new(500.0, 100000.0, 0.4);
+    let mut reg2 = StageOnePlayer::new(500.0, 100000.0, 0.6);
+    let mut oft1 = StageTwoPlayer::new(500.0, 100000.0, 0.3);
+    let mut oft2 = StageTwoPlayer::new(500.0, 100000.0, 0.7);
 
     let up = UpstreamPlayer::new(Q, 0.2, 1000.0, 1000.0, 2, 2);
-
-    // clamp initial shares to respect budgets
-    reg1.m = reg1.m.min(reg1.max_m(&up));
-    reg2.m = reg2.m.min(reg2.max_m(&up));
-    oft1.m = oft1.m.min(oft1.max_m(&up));
-    oft2.m = oft2.m.min(oft2.max_m(&up));
 
     // Low level game 2: Stage Two players (oft1, oft2)
     for _ in 0..iter_range {
@@ -339,9 +272,9 @@ pub fn start_game(
             |x| oft1.constraint(&up, x),
             oft1.m,
             0.0,
-            oft1.max_m(&up),
+            10000.0,
             1e-6,
-            1000,
+            100,
         );
 
         // oft2 optimizes against oft1 (fixed)
@@ -350,9 +283,9 @@ pub fn start_game(
             |x| oft2.constraint(&up, x),
             oft2.m,
             0.0,
-            f64::INFINITY,
+            10000.0,
             1e-6,
-            1000,
+            100,
         );
 
         oft1.m = m21_new;
@@ -369,9 +302,9 @@ pub fn start_game(
             |x| reg1.constraint(&up, x),
             reg1.m,
             0.0,
-            reg1.max_m(&up),
+            10000.0,
             1e-6,
-            1000,
+            100,
         );
 
         // reg2 optimizes against reg1 (fixed)
@@ -380,9 +313,9 @@ pub fn start_game(
             |x| reg2.constraint(&up, x),
             reg2.m,
             0.0,
-            reg2.max_m(&up),
+            10000.0,
             1e-6,
-            1000,
+            100,
         );
 
         reg1.m = m11_new;
@@ -395,7 +328,12 @@ pub fn start_game(
     // Upper level game: Use genetic algorithm to optimize upstream player parameters
     let ga = crate::ga::GA::new(500, 500, 0.1);
 
-    let p_range = vec![(0.0, 10000.0), (0.0, 1.0), (0.0, 100000.0), (0.0, 100000.0)];
+    let p_range = vec![
+        (0.0, 100000.0),
+        (0.0, 1.0),
+        (0.0, 100000.0),
+        (0.0, 100000.0),
+    ];
     let m_range = vec![(-5.0, 5.0), (-0.5, 0.5), (-5.0, 5.0), (-5.0, 5.0)];
 
     let penalty_func = |x: &[f64]| penalty_function(&up, &params, x, m1, m2);
