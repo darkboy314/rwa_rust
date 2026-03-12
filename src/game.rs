@@ -2,9 +2,8 @@
 /// Stage 1: Upstream player (energy storage provider)
 /// Stage 2: Stage One players (renewable energy generators)  
 /// Stage 3: Stage Two players (electricity offtakers)
-use argmin::core::{CostFunction, Error, Executor, Problem, SyncAlias};
+use argmin::core::{CostFunction, Error, Executor, State};
 use argmin::solver::brent::BrentOpt;
-use rayon::result;
 
 const T: f64 = 10.0; // Lifespan years
 const Q: f64 = 600.0; // Storage capacity (MWh)
@@ -168,7 +167,7 @@ struct ClosureFunc<F>(F);
 
 impl<F> CostFunction for ClosureFunc<F>
 where
-    F: Fn(f64) -> f64 + Send + Sync + 'static,
+    F: Fn(f64) -> f64 + Send + Sync,
 {
     type Param = f64;
     type Output = f64;
@@ -188,20 +187,20 @@ pub fn alter_best_response<F, C>(
     ub: f64,
     tol: f64,
     max_iter: usize,
-) -> Result<f64, Error>
+) -> f64
 where
-    F: Fn(f64) -> f64,
-    C: Fn(f64) -> f64,
+    F: Fn(f64) -> f64 + Send + Sync,
+    C: Fn(f64) -> f64 + Send + Sync,
 {
-    let problem = Problem::new(ClosureFunc(f));
+    let problem = ClosureFunc(f);
     let solver = BrentOpt::new(lb, ub);
 
-    let res = Executor::new(ClosureFunc(f), solver)
-    .param()
-    .max_iters(max_iter).
-    .run()?;
+    let res = Executor::new(problem, solver)
+        .configure(|state| state.max_iters(max_iter.try_into().unwrap()).param(x0))
+        .run()
+        .expect("Optimization Failed");
 
-    Ok(*res.state().best_param().unwarp())
+    *res.state().get_best_param().unwrap()
 }
 
 /// Penalty function for genetic algorithm
