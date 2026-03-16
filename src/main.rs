@@ -64,7 +64,7 @@ fn main() {
     let rho_pv = 0.3;
     let rho_dv = 0.2;
 
-    let e_cf = 100.0; // For REVB E_cf' = 1.5 * E_cf
+    let e_cf = 580.0; // For REVB E_cf' = 1.5 * E_cf
     let var_cf = 10.0; //or REVB Var_cf' = 4 * Var_cf (2^2)
 
     // Build covariance matrix
@@ -88,6 +88,9 @@ fn main() {
     ];
 
     println!("Starting RWA simulation with {} iterations...", 10000);
+
+    // // Run in single thread for testing
+    process_iteration(e_cf, var_cf, &mean, &cov);
 
     // Run parallel iterations
     let iteration_results: Vec<(Vec<f64>, Vec<f64>)> = (0..10000)
@@ -197,8 +200,8 @@ fn process_iteration(
     cov: &[Vec<f64>],
 ) -> (Vec<f64>, Vec<f64>) {
     // Generate samples
-    let cf = distribution::operation_cost_gamma(100, e_cf, var_cf, Some(0));
-    let dpv = distribution::sample_multivariate_lognormal(100, mean, cov, Some(0));
+    let cf = distribution::operation_cost_gamma(100, e_cf, var_cf, None);
+    let dpv = distribution::sample_multivariate_lognormal(100, mean, cov, None);
 
     // Calculate statistics
     let mean_d = utils::mean(&dpv.0);

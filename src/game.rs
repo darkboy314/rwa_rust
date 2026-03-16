@@ -1,12 +1,11 @@
 /// Game theory module implementing the three-stage game
 /// Stage 1: Upstream player (energy storage provider)
-/// Stage 2: Stage One players (renewable energy generators)  
+/// Stage 2: Stage One players (renewable energy generators)
 /// Stage 3: Stage Two players (electricity offtakers)
-use argmin::core::{CostFunction, Error, Executor, State};
-use argmin::solver::brent::BrentOpt;
+use cobyla::{Func, RhoBeg, StopTols, minimize};
 
 const T: f64 = 10.0; // Lifespan years
-const Q: f64 = 600.0; // Storage capacity (MWh)
+const Q: f64 = 100.0; // Storage capacity (MWh)
 const C_T: f64 = 100.0; // Transaction cost ($)
 const K: f64 = 584000.0; // Development cost per unit ($/MWh) 
 const F: f64 = 1700.0; // Sales price per unit ($/MWh)
@@ -56,16 +55,23 @@ impl StageOnePlayer {
     }
 
     /// Profit function for stage one player
-    pub fn theta(&self, up: &UpstreamPlayer, params: &GameParams, m2: f64, m_all: &[f64]) -> f64 {
+    pub fn theta(
+        &self,
+        m: f64,
+        up: &UpstreamPlayer,
+        params: &GameParams,
+        m2: f64,
+        m_all: &[f64],
+    ) -> f64 {
         let m1 = m_all.iter().sum::<f64>() + 1e-10;
 
         T * params.e_dp
-            + (self.m / m1)
+            + (m / m1)
                 * up.r
                 * (up.p2 * m2
                     - T * params.e_cf * up.q
                     - self.lbd * T * (params.sigma_cf * params.sigma_cf) * up.q)
-            - up.p1 * self.m
+            - up.p1 * m
             - C_T
     }
 
@@ -86,15 +92,15 @@ impl StageTwoPlayer {
     }
 
     /// Profit function for stage two player
-    pub fn mu(&self, up: &UpstreamPlayer, params: &GameParams, m_all: &[f64]) -> f64 {
+    pub fn mu(&self, m: f64, up: &UpstreamPlayer, params: &GameParams, m_all: &[f64]) -> f64 {
         let m2 = m_all.iter().sum::<f64>() + 1e-10;
 
-        T * F * params.e_v + T * (self.m / m2) * up.q * params.e_p
+        T * F * params.e_v + T * (m / m2) * up.q * params.e_p
             - T * params.e_pv
             - self.gma * T * (F * params.sigma_v).powi(2)
-            - self.gma * T * ((self.m / m2) * up.q * params.sigma_p).powi(2)
+            - self.gma * T * ((m / m2) * up.q * params.sigma_p).powi(2)
             + self.gma * T * params.sigma_pv.powi(2)
-            - up.p2 * self.m
+            - up.p2 * m
             - C_T
     }
 
@@ -163,22 +169,7 @@ impl UpstreamPlayer {
     }
 }
 
-struct ClosureFunc<F>(F);
-
-impl<F> CostFunction for ClosureFunc<F>
-where
-    F: Fn(f64) -> f64 + Send + Sync,
-{
-    type Param = f64;
-    type Output = f64;
-
-    fn cost(&self, x: &Self::Param) -> Result<Self::Output, Error> {
-        Ok(self.0(*x))
-    }
-}
-
-/// Constrained 1‑D optimization using `argmin`.
-/// now leverages GoldenSectionSearch with explicit bounds.
+/// Constrained 1-D optimization using COBYLA.
 pub fn alter_best_response<F, C>(
     f: F,
     constraint: C,
@@ -192,15 +183,35 @@ where
     F: Fn(f64) -> f64 + Send + Sync,
     C: Fn(f64) -> f64 + Send + Sync,
 {
-    let problem = ClosureFunc(f);
-    let solver = BrentOpt::new(lb, ub);
+    let objective = |x: &[f64], _data: &mut ()| f(x[0]);
+    let inequality = |x: &[f64], _data: &mut ()| constraint(x[0]);
+    let constraints: Vec<&dyn Func<()>> = vec![&inequality];
+    let x_init = vec![x0];
+    let bounds = [(lb, ub)];
+    let rho = if lb.is_finite() && ub.is_finite() {
+        ((ub - lb).abs() * 0.25).max(tol * 10.0).max(1e-4)
+    } else {
+        x0.abs().max(1.0).max(tol * 10.0)
+    };
+    let stop_tol = StopTols {
+        xtol_abs: vec![tol.max(1e-9)],
+        ftol_rel: tol.max(1e-9),
+        ..StopTols::default()
+    };
 
-    let res = Executor::new(problem, solver)
-        .configure(|state| state.max_iters(max_iter.try_into().unwrap()).param(x0))
-        .run()
-        .expect("Optimization Failed");
-
-    *res.state().get_best_param().unwrap()
+    match minimize(
+        objective,
+        &x_init,
+        &bounds,
+        &constraints,
+        (),
+        max_iter.max(1),
+        RhoBeg::All(rho),
+        Some(stop_tol),
+    ) {
+        Ok((_status, x_opt, _y_opt)) => x_opt[0],
+        Err((_status, x_opt, _y_opt)) => x_opt[0],
+    }
 }
 
 /// Penalty function for genetic algorithm
@@ -256,33 +267,33 @@ pub fn start_game(
     };
 
     // Initialize players
-    let mut reg1 = StageOnePlayer::new(500.0, 100000.0, 0.4);
-    let mut reg2 = StageOnePlayer::new(500.0, 100000.0, 0.6);
-    let mut oft1 = StageTwoPlayer::new(500.0, 100000.0, 0.3);
-    let mut oft2 = StageTwoPlayer::new(500.0, 100000.0, 0.7);
+    let mut reg1 = StageOnePlayer::new(500.0, 1e10, 0.4);
+    let mut reg2 = StageOnePlayer::new(500.0, 1e10, 0.6);
+    let mut oft1 = StageTwoPlayer::new(500.0, 1e10, 0.3);
+    let mut oft2 = StageTwoPlayer::new(500.0, 1e10, 0.7);
 
-    let up = UpstreamPlayer::new(Q, 0.2, 1000.0, 1000.0, 2, 2);
+    let up = UpstreamPlayer::new(Q, 0.2, 500.0, 500.0, 2, 2);
 
     // Low level game 2: Stage Two players (oft1, oft2)
     for _ in 0..iter_range {
         // oft1 optimizes against oft2 (fixed)
         let m21_new = alter_best_response(
-            |x| -oft1.mu(&up, &params, &[x, oft2.m]), // Negative because we minimize
+            |x| -oft1.mu(x, &up, &params, &[x, oft2.m]),
             |x| oft1.constraint(&up, x),
             oft1.m,
             0.0,
-            10000.0,
+            f64::INFINITY,
             1e-6,
             100,
         );
 
         // oft2 optimizes against oft1 (fixed)
         let m22_new = alter_best_response(
-            |x| -oft2.mu(&up, &params, &[oft1.m, x]), // Negative because we minimize
+            |x| -oft2.mu(x, &up, &params, &[x, oft1.m]),
             |x| oft2.constraint(&up, x),
             oft2.m,
             0.0,
-            10000.0,
+            f64::INFINITY,
             1e-6,
             100,
         );
@@ -297,22 +308,22 @@ pub fn start_game(
 
         // reg1 optimizes against reg2 (fixed)
         let m11_new = alter_best_response(
-            |x| -reg1.theta(&up, &params, m2, &[x, reg2.m]), // Negative because we minimize
+            |x| -reg1.theta(x, &up, &params, m2, &[x, reg2.m]),
             |x| reg1.constraint(&up, x),
             reg1.m,
             0.0,
-            10000.0,
+            f64::INFINITY,
             1e-6,
             100,
         );
 
         // reg2 optimizes against reg1 (fixed)
         let m12_new = alter_best_response(
-            |x| -reg2.theta(&up, &params, m2, &[reg1.m, x]), // Negative because we minimize
+            |x| -reg2.theta(x, &up, &params, m2, &[x, reg1.m]),
             |x| reg2.constraint(&up, x),
             reg2.m,
             0.0,
-            10000.0,
+            f64::INFINITY,
             1e-6,
             100,
         );
@@ -325,13 +336,13 @@ pub fn start_game(
     let m2 = StageTwoPlayer::m2(&[oft1.m, oft2.m]);
 
     // Upper level game: Use genetic algorithm to optimize upstream player parameters
-    let ga = crate::ga::GA::new(500, 500, 0.1);
+    let ga = crate::ga::GA::new(500, 200, 0.1);
 
     let p_range = vec![
-        (0.0, 100000.0),
+        (0.0, 10000.0),
         (0.0, 1.0),
-        (0.0, 100000.0),
-        (0.0, 100000.0),
+        (0.0, 10000.0),
+        (0.0, 10000.0),
     ];
     let m_range = vec![(-5.0, 5.0), (-0.5, 0.5), (-5.0, 5.0), (-5.0, 5.0)];
 
@@ -340,13 +351,12 @@ pub fn start_game(
 
     let (x, result) = ga.run(obj_func, Some(penalty_func), &p_range, &m_range);
 
-    // Check if solution is valid (no NaN)
     if x.iter().any(|&val| val.is_nan()) {
         return (
-            f64::NAN,
-            f64::NAN,
-            f64::NAN,
-            f64::NAN,
+            reg1.m,
+            reg2.m,
+            oft1.m,
+            oft2.m,
             f64::NAN,
             f64::NAN,
             f64::NAN,
@@ -355,7 +365,5 @@ pub fn start_game(
         );
     }
 
-    (
-        reg1.m, reg2.m, oft1.m, oft2.m, x[0], x[1], x[2], x[3], result,
-    )
+    (reg1.m, reg2.m, oft1.m, oft2.m, x[0], x[1], x[2], x[3], result)
 }
