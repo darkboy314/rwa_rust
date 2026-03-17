@@ -48,12 +48,12 @@ fn main() {
     ];
 
     // Market parameters
-    let e_d = 30.0;
+    let e_d = 100.0;
     let e_p = 1400.0;
-    let e_v = 50.0;
+    let e_v = 100.0;
 
     let var_d = 3.0;
-    let var_p = 0.5;
+    let var_p = 1.0;
     let var_v = 2.0;
 
     let (mu_d, sigma_d) = distribution::lognormal_params_from_mean_var(e_d, var_d);
@@ -89,8 +89,8 @@ fn main() {
 
     println!("Starting RWA simulation with {} iterations...", 10000);
 
-    // // Run in single thread for testing
-    process_iteration(e_cf, var_cf, &mean, &cov);
+    // Run in single thread for testing
+    // process_iteration(e_cf, var_cf, &mean, &cov);
 
     // Run parallel iterations
     let iteration_results: Vec<(Vec<f64>, Vec<f64>)> = (0..10000)

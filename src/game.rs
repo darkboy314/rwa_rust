@@ -4,8 +4,9 @@
 /// Stage 3: Stage Two players (electricity offtakers)
 use cobyla::{Func, RhoBeg, StopTols, minimize};
 
-const T: f64 = 10.0; // Lifespan years
-const Q: f64 = 100.0; // Storage capacity (MWh)
+const T: f64 = 5.0; // Lifespan years
+const Q: f64 = 200.0; // Storage capacity (MWh)
+const R: f64 = 0.2; // Profit sharing ratio
 const C_T: f64 = 100.0; // Transaction cost ($)
 const K: f64 = 584000.0; // Development cost per unit ($/MWh) 
 const F: f64 = 1700.0; // Sales price per unit ($/MWh)
@@ -272,7 +273,7 @@ pub fn start_game(
     let mut oft1 = StageTwoPlayer::new(500.0, 1e10, 0.3);
     let mut oft2 = StageTwoPlayer::new(500.0, 1e10, 0.7);
 
-    let up = UpstreamPlayer::new(Q, 0.2, 500.0, 500.0, 2, 2);
+    let up = UpstreamPlayer::new(Q, R, 500.0, 500.0, 2, 2);
 
     // Low level game 2: Stage Two players (oft1, oft2)
     for _ in 0..iter_range {
@@ -338,12 +339,7 @@ pub fn start_game(
     // Upper level game: Use genetic algorithm to optimize upstream player parameters
     let ga = crate::ga::GA::new(500, 200, 0.1);
 
-    let p_range = vec![
-        (0.0, 10000.0),
-        (0.0, 1.0),
-        (0.0, 10000.0),
-        (0.0, 10000.0),
-    ];
+    let p_range = vec![(0.0, 10000.0), (0.0, 1.0), (0.0, 10000.0), (0.0, 10000.0)];
     let m_range = vec![(-5.0, 5.0), (-0.5, 0.5), (-5.0, 5.0), (-5.0, 5.0)];
 
     let penalty_func = |x: &[f64]| penalty_function(&up, &params, x, m1, m2);
@@ -351,19 +347,21 @@ pub fn start_game(
 
     let (x, result) = ga.run(obj_func, Some(penalty_func), &p_range, &m_range);
 
-    if x.iter().any(|&val| val.is_nan()) {
-        return (
-            reg1.m,
-            reg2.m,
-            oft1.m,
-            oft2.m,
-            f64::NAN,
-            f64::NAN,
-            f64::NAN,
-            f64::NAN,
-            f64::NAN,
-        );
-    }
+    // if x.iter().any(|&val| val.is_nan()) {
+    //     return (
+    //         reg1.m,
+    //         reg2.m,
+    //         oft1.m,
+    //         oft2.m,
+    //         f64::NAN,
+    //         f64::NAN,
+    //         f64::NAN,
+    //         f64::NAN,
+    //         f64::NAN,
+    //     );
+    // }
 
-    (reg1.m, reg2.m, oft1.m, oft2.m, x[0], x[1], x[2], x[3], result)
+    (
+        reg1.m, reg2.m, oft1.m, oft2.m, x[0], x[1], x[2], x[3], result,
+    )
 }
