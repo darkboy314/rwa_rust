@@ -3,8 +3,10 @@
 /// Stage 2: Stage One players (renewable energy generators)
 /// Stage 3: Stage Two players (electricity offtakers)
 use cobyla::{Func, RhoBeg, StopTols, minimize};
+use argmin::core::{CostFunction, Error as ArgminError, Executor};
+use argmin::solver::brent::BrentOpt;
 
-const T: f64 = 5.0; // Lifespan years
+const T: f64 = 10.0; // Lifespan years
 const Q: f64 = 200.0; // Storage capacity (MWh)
 const R: f64 = 0.2; // Profit sharing ratio
 const C_T: f64 = 100.0; // Transaction cost ($)
@@ -215,6 +217,74 @@ where
     }
 }
 
+/// Constrained 1-D optimization using argmin BrentOpt via penalty method.
+pub fn alter_best_response_brent<F, C>(
+    f: F,
+    constraint: C,
+    x0: f64,
+    lb: f64,
+    ub: f64,
+    tol: f64,
+    max_iter: usize,
+) -> f64
+where
+    F: Fn(f64) -> f64 + Send + Sync,
+    C: Fn(f64) -> f64 + Send + Sync,
+{
+    struct PenalizedCost<'a, F, C> {
+        objective: &'a F,
+        constraint: &'a C,
+        penalty: f64,
+    }
+
+    impl<F, C> CostFunction for PenalizedCost<'_, F, C>
+    where
+        F: Fn(f64) -> f64 + Send + Sync,
+        C: Fn(f64) -> f64 + Send + Sync,
+    {
+        type Param = f64;
+        type Output = f64;
+
+        fn cost(&self, x: &Self::Param) -> Result<Self::Output, ArgminError> {
+            let base = (self.objective)(*x);
+            let c = (self.constraint)(*x);
+            let violation = (-c).max(0.0);
+            Ok(base + self.penalty * violation * violation)
+        }
+    }
+
+    let eps = tol.max(1e-9);
+    let span = x0.abs().max(1.0) * 10.0;
+    let (min_x, mut max_x) = match (lb.is_finite(), ub.is_finite()) {
+        (true, true) => (lb, ub),
+        (true, false) => (lb, (x0 + span).max(lb + eps)),
+        (false, true) => ((x0 - span).min(ub - eps), ub),
+        (false, false) => (x0 - span, x0 + span),
+    };
+
+    if min_x >= max_x {
+        max_x = min_x + eps;
+    }
+
+    let solver = BrentOpt::new(min_x, max_x);
+    let cost = PenalizedCost {
+        objective: &f,
+        constraint: &constraint,
+        penalty: 1e12,
+    };
+
+    match Executor::new(cost, solver)
+        .configure(|state| state.max_iters(max_iter.max(1) as u64))
+        .run()
+    {
+        Ok(result) => {
+            let state = result.state();
+            state.best_param.or(state.param).unwrap_or(x0)
+        }
+        Err(_) => x0,
+    }
+}
+
 /// Penalty function for genetic algorithm
 pub fn penalty_function(
     up: &UpstreamPlayer,
@@ -337,7 +407,7 @@ pub fn start_game(
     let m2 = StageTwoPlayer::m2(&[oft1.m, oft2.m]);
 
     // Upper level game: Use genetic algorithm to optimize upstream player parameters
-    let ga = crate::ga::GA::new(500, 200, 0.1);
+    let ga = crate::ga::GA::new(3000, 200, 0.1);
 
     let p_range = vec![(0.0, 10000.0), (0.0, 1.0), (0.0, 10000.0), (0.0, 10000.0)];
     let m_range = vec![(-5.0, 5.0), (-0.5, 0.5), (-5.0, 5.0), (-5.0, 5.0)];

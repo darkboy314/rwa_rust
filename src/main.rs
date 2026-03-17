@@ -9,6 +9,11 @@ use plotters::prelude::*;
 use rayon::prelude::*;
 use std::f64::consts::PI;
 use std::fs;
+use std::io::{self, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::thread;
+use std::time::Duration;
 
 fn lognormal_pdf(x: f64, mu: f64, sigma: f64) -> f64 {
     if x <= 0.0 {
@@ -64,7 +69,7 @@ fn main() {
     let rho_pv = 0.3;
     let rho_dv = 0.2;
 
-    let e_cf = 580.0; // For REVB E_cf' = 1.5 * E_cf
+    let e_cf = 50.0; // For REVB E_cf' = 1.5 * E_cf
     let var_cf = 10.0; //or REVB Var_cf' = 4 * Var_cf (2^2)
 
     // Build covariance matrix
@@ -87,21 +92,84 @@ fn main() {
         ],
     ];
 
-    println!("Starting RWA simulation with {} iterations...", 10000);
+    let total_iterations = 10000usize;
+    println!(
+        "Starting RWA simulation with {} iterations...",
+        total_iterations
+    );
 
     // Run in single thread for testing
     // process_iteration(e_cf, var_cf, &mean, &cov);
 
-    // Run parallel iterations
-    let iteration_results: Vec<(Vec<f64>, Vec<f64>)> = (0..10000)
+    // Run parallel iterations with in-place per-thread progress display
+    let worker_count = rayon::current_num_threads();
+    let thread_status = Arc::new(
+        (0..worker_count)
+            .map(|_| AtomicUsize::new(0))
+            .collect::<Vec<_>>(),
+    );
+    let completed_count = Arc::new(AtomicUsize::new(0));
+    let stop_progress = Arc::new(AtomicBool::new(false));
+
+    let progress_lines = worker_count + 1;
+    println!("Overall progress: 0/{}", total_iterations);
+    for tid in 0..worker_count {
+        println!("Thread {:02}: idle", tid);
+    }
+
+    let reporter_status = Arc::clone(&thread_status);
+    let reporter_completed = Arc::clone(&completed_count);
+    let reporter_stop = Arc::clone(&stop_progress);
+    let reporter = thread::spawn(move || {
+        let mut stdout = io::stdout();
+
+        loop {
+            print!("\x1B[{}A", progress_lines);
+
+            let done = reporter_completed.load(Ordering::Relaxed);
+            print!("\x1B[2K\rOverall progress: {}/{}\n", done, total_iterations);
+
+            for tid in 0..worker_count {
+                let current = reporter_status[tid].load(Ordering::Relaxed);
+                if current == 0 {
+                    print!("\x1B[2K\rThread {:02}: idle\n", tid);
+                } else {
+                    print!(
+                        "\x1B[2K\rThread {:02}: processing iteration {}/{}\n",
+                        tid, current, total_iterations
+                    );
+                }
+            }
+
+            let _ = stdout.flush();
+
+            if reporter_stop.load(Ordering::Relaxed) {
+                break;
+            }
+
+            thread::sleep(Duration::from_millis(120));
+        }
+    });
+
+    let worker_status = Arc::clone(&thread_status);
+    let worker_completed = Arc::clone(&completed_count);
+
+    let iteration_results: Vec<(Vec<f64>, Vec<f64>)> = (0..total_iterations)
         .into_par_iter()
         .map(|i| {
-            if i % 100 == 0 {
-                println!("Processing iteration {}/10000", i);
+            if let Some(tid) = rayon::current_thread_index() {
+                worker_status[tid].store(i + 1, Ordering::Relaxed);
             }
-            process_iteration(e_cf, var_cf, &mean, &cov)
+
+            let out = process_iteration(e_cf, var_cf, &mean, &cov);
+            worker_completed.fetch_add(1, Ordering::Relaxed);
+            out
         })
         .collect();
+
+    stop_progress.store(true, Ordering::Relaxed);
+    let _ = reporter.join();
+    println!();
 
     // Separate results and samples
     let mut results: Vec<Vec<f64>> = Vec::with_capacity(10000);
@@ -118,12 +186,12 @@ fn main() {
         }
 
         // Print iteration results like Python version
-        let q = result_data[16];
-        let r = result_data[17];
-        let p1 = result_data[18];
-        let p2 = result_data[19];
-        let fun = result_data[20];
-        println!("[{:.6}, {:.6}, {:.6}, {:.6}] {:.6}", q, r, p1, p2, fun);
+        // let q = result_data[16];
+        // let r = result_data[17];
+        // let p1 = result_data[18];
+        // let p2 = result_data[19];
+        // let fun = result_data[20];
+        // println!("q = {:.6}, r = {:.6}, p1 = {:.6}, p2 = {:.6}, pi = {:.6}", q, r, p1, p2, fun);
     }
 
     let global_filename = "./output/result.csv".to_string();
@@ -200,8 +268,8 @@ fn process_iteration(
     cov: &[Vec<f64>],
 ) -> (Vec<f64>, Vec<f64>) {
     // Generate samples
-    let cf = distribution::operation_cost_gamma(100, e_cf, var_cf, None);
-    let dpv = distribution::sample_multivariate_lognormal(100, mean, cov, None);
+    let cf = distribution::operation_cost_gamma(100, e_cf, var_cf, Some(0));
+    let dpv = distribution::sample_multivariate_lognormal(100, mean, cov, Some(0));
 
     // Calculate statistics
     let mean_d = utils::mean(&dpv.0);

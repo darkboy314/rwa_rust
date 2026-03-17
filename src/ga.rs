@@ -47,10 +47,6 @@ impl GA {
 
             // Select best individuals
             population = self.filter(&population, &scores, self.pop_size);
-
-            if (_gen + 1) % 100 == 0 {
-                println!("Generation {}: best fitness = {}", _gen, scores[0]);
-            }
         }
 
         // Return best individual
