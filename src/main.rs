@@ -1,39 +1,18 @@
 mod distribution;
 mod ga;
 mod game;
+mod plotting;
 mod utils;
 
 use chrono::Local;
 use csv::Writer;
-use plotters::prelude::*;
 use rayon::prelude::*;
-use std::f64::consts::PI;
 use std::fs;
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
-
-fn lognormal_pdf(x: f64, mu: f64, sigma: f64) -> f64 {
-    if x <= 0.0 {
-        0.0
-    } else {
-        let ln_x = x.ln();
-        let coeff = 1.0 / (x * sigma * (2.0 * PI).sqrt());
-        let exponent = -((ln_x - mu).powi(2)) / (2.0 * sigma.powi(2));
-        coeff * exponent.exp()
-    }
-}
-
-fn gamma_pdf(x: f64, k: f64, theta: f64) -> f64 {
-    if x <= 0.0 {
-        0.0
-    } else {
-        let coeff = x.powf(k - 1.0) * (-x / theta).exp() / (theta.powf(k) * utils::gamma(k));
-        coeff
-    }
-}
 
 fn main() {
     let start = std::time::Instant::now();
@@ -154,7 +133,7 @@ fn main() {
     let worker_status = Arc::clone(&thread_status);
     let worker_completed = Arc::clone(&completed_count);
 
-    let iteration_results: Vec<(Vec<f64>, Vec<f64>)> = (0..total_iterations)
+    let iteration_results: Vec<(Vec<f64>, Vec<f64>, Vec<f64>)> = (0..total_iterations)
         .into_par_iter()
         .map(|i| {
             if let Some(tid) = rayon::current_thread_index() {
@@ -171,27 +150,35 @@ fn main() {
     let _ = reporter.join();
     println!();
 
-    // Separate results and samples
+    // Separate results and save one figure pair for each iteration
     let mut results: Vec<Vec<f64>> = Vec::with_capacity(10000);
-    let mut price_samples: Vec<f64> = Vec::new();
-    let mut cost_samples: Vec<f64> = Vec::new();
+    let mut skipped_figure_count = 0usize;
 
-    for (result_data, price_sample) in iteration_results {
+    for (idx, (result_data, price_sample, cost_sample)) in iteration_results.into_iter().enumerate() {
         results.push(result_data.clone());
-        price_samples.extend(price_sample);
 
-        // Generate cost samples for figure 2 (using first iteration as representative)
-        if cost_samples.is_empty() {
-            cost_samples = distribution::operation_cost_gamma(100, e_cf, var_cf, Some(0));
+        let q = result_data[16];
+        let r = result_data[17];
+        let p1 = result_data[18];
+        let p2 = result_data[19];
+
+        if !(q.is_finite() && r.is_finite() && p1.is_finite() && p2.is_finite()) {
+            skipped_figure_count += 1;
+            continue;
         }
 
-        // Print iteration results like Python version
-        // let q = result_data[16];
-        // let r = result_data[17];
-        // let p1 = result_data[18];
-        // let p2 = result_data[19];
-        // let fun = result_data[20];
-        // println!("q = {:.6}, r = {:.6}, p1 = {:.6}, p2 = {:.6}, pi = {:.6}", q, r, p1, p2, fun);
+        if let Err(e) = plotting::save_iteration_figures(
+            idx,
+            &price_sample,
+            &cost_sample,
+            mu_p,
+            sigma_p,
+            e_cf,
+            var_cf,
+            &output_dir,
+        ) {
+            println!("Warning: Failed to generate figures for iteration {}: {}", idx, e);
+        }
     }
 
     let global_filename = "./output/result.csv".to_string();
@@ -208,24 +195,12 @@ fn main() {
         println!("Global results also saved to {}", global_filename);
     }
 
-    // Generate figures
-    if let Err(e) = generate_figure_1(&price_samples, mu_p, sigma_p, &output_dir) {
-        println!("Warning: Failed to generate Figure 1: {}", e);
-    } else {
-        println!(
-            "Figure 1 saved to {}/figure-1/price_distribution.png",
-            output_dir
-        );
-    }
-
-    if let Err(e) = generate_figure_2(&cost_samples, e_cf, var_cf, &output_dir) {
-        println!("Warning: Failed to generate Figure 2: {}", e);
-    } else {
-        println!(
-            "Figure 2 saved to {}/figure-2/cost_distribution.png",
-            output_dir
-        );
-    }
+    println!("Figure 1 files saved to {}/figure-1", output_dir);
+    println!("Figure 2 files saved to {}/figure-2", output_dir);
+    println!(
+        "Skipped figure generation for {} iterations due to unsolved q/r/p1/p2",
+        skipped_figure_count
+    );
 
     // Print summary statistics
     print_summary_statistics(&results, &headers);
@@ -266,7 +241,7 @@ fn process_iteration(
     var_cf: f64,
     mean: &[f64],
     cov: &[Vec<f64>],
-) -> (Vec<f64>, Vec<f64>) {
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     // Generate samples
     let cf = distribution::operation_cost_gamma(100, e_cf, var_cf, Some(0));
     let dpv = distribution::sample_multivariate_lognormal(100, mean, cov, Some(0));
@@ -298,8 +273,8 @@ fn process_iteration(
         m12, m21, m22, q, r, p1, p2, fun,
     ];
 
-    // Return both result data and price samples for plotting
-    (result_data, dpv.1.clone())
+    // Return result data with per-iteration samples for plotting
+    (result_data, dpv.1.clone(), cf)
 }
 
 fn write_results(
@@ -327,148 +302,3 @@ fn write_results(
     Ok(())
 }
 
-fn generate_figure_1(
-    price_samples: &[f64],
-    mu_p: f64,
-    sigma_p: f64,
-    output_dir: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let figure_path = format!("{}/figure-1/price_distribution.png", output_dir);
-
-    let root = BitMapBackend::new(&figure_path, (800, 600)).into_drawing_area();
-    root.fill(&WHITE)?;
-
-    let min_val = price_samples.iter().cloned().fold(f64::INFINITY, f64::min);
-    let max_val = price_samples
-        .iter()
-        .cloned()
-        .fold(f64::NEG_INFINITY, f64::max);
-
-    let mut chart = ChartBuilder::on(&root)
-        .caption(
-            "Figure 1 - Distribution of Price Samples and PDF",
-            ("sans-serif", 20),
-        )
-        .margin(5)
-        .x_label_area_size(30)
-        .y_label_area_size(30)
-        .build_cartesian_2d(min_val..max_val, 0.0..100.0)?;
-
-    chart.configure_mesh().draw()?;
-
-    // Create histogram data manually
-    let bin_count = 20;
-    let bin_width = (max_val - min_val) / bin_count as f64;
-    let mut bins = vec![0u32; bin_count];
-
-    for &sample in price_samples {
-        let bin_idx = ((sample - min_val) / bin_width).floor() as usize;
-        let bin_idx = bin_idx.min(bin_count - 1);
-        bins[bin_idx] += 1;
-    }
-
-    // Draw histogram as bars
-    for (i, &count) in bins.iter().enumerate() {
-        let x0 = min_val + i as f64 * bin_width;
-        let x1 = x0 + bin_width;
-        let y = count as f64;
-
-        chart.draw_series(std::iter::once(Rectangle::new(
-            [(x0, 0.0), (x1, y)],
-            BLUE.mix(0.5).filled(),
-        )))?;
-    }
-
-    // Draw theoretical log-normal PDF
-    let pdf_points: Vec<(f64, f64)> = (0..100)
-        .map(|i| {
-            let x = min_val + (max_val - min_val) * i as f64 / 99.0;
-            let pdf_val = lognormal_pdf(x, mu_p, sigma_p) * 100.0; // Scale for visibility
-            (x, pdf_val)
-        })
-        .collect();
-
-    chart
-        .draw_series(LineSeries::new(pdf_points, &RED))?
-        .label(format!("Log-normal PDF (μ={:.2}, σ={:.3})", mu_p, sigma_p))
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
-
-    chart.configure_series_labels().draw()?;
-
-    root.present()?;
-    Ok(())
-}
-
-fn generate_figure_2(
-    cost_samples: &[f64],
-    e_cf: f64,
-    var_cf: f64,
-    output_dir: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let figure_path = format!("{}/figure-2/cost_distribution.png", output_dir);
-
-    let root = BitMapBackend::new(&figure_path, (800, 600)).into_drawing_area();
-    root.fill(&WHITE)?;
-
-    let min_val = cost_samples.iter().cloned().fold(f64::INFINITY, f64::min);
-    let max_val = cost_samples
-        .iter()
-        .cloned()
-        .fold(f64::NEG_INFINITY, f64::max);
-
-    let mut chart = ChartBuilder::on(&root)
-        .caption(
-            "Figure 2 - Distribution of Operating Cost Samples and PDF",
-            ("sans-serif", 20),
-        )
-        .margin(5)
-        .x_label_area_size(30)
-        .y_label_area_size(30)
-        .build_cartesian_2d(min_val..max_val, 0.0..50.0)?;
-
-    chart.configure_mesh().draw()?;
-
-    // Create histogram data manually
-    let bin_count = 20;
-    let bin_width = (max_val - min_val) / bin_count as f64;
-    let mut bins = vec![0u32; bin_count];
-
-    for &sample in cost_samples {
-        let bin_idx = ((sample - min_val) / bin_width).floor() as usize;
-        let bin_idx = bin_idx.min(bin_count - 1);
-        bins[bin_idx] += 1;
-    }
-
-    // Draw histogram as bars
-    for (i, &count) in bins.iter().enumerate() {
-        let x0 = min_val + i as f64 * bin_width;
-        let x1 = x0 + bin_width;
-        let y = count as f64;
-
-        chart.draw_series(std::iter::once(Rectangle::new(
-            [(x0, 0.0), (x1, y)],
-            RED.mix(0.5).filled(),
-        )))?;
-    }
-
-    // Draw theoretical gamma PDF
-    let theta = var_cf / e_cf;
-    let k = e_cf / theta;
-    let pdf_points: Vec<(f64, f64)> = (0..100)
-        .map(|i| {
-            let x = min_val + (max_val - min_val) * i as f64 / 99.0;
-            let pdf_val = gamma_pdf(x, k, theta) * 1000.0; // Scale for visibility
-            (x, pdf_val)
-        })
-        .collect();
-
-    chart
-        .draw_series(LineSeries::new(pdf_points, &BLUE))?
-        .label(format!("Gamma PDF (k={:.2}, θ={:.3})", k, theta))
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLUE));
-
-    chart.configure_series_labels().draw()?;
-
-    root.present()?;
-    Ok(())
-}

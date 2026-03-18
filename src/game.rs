@@ -407,7 +407,7 @@ pub fn start_game(
     let m2 = StageTwoPlayer::m2(&[oft1.m, oft2.m]);
 
     // Upper level game: Use genetic algorithm to optimize upstream player parameters
-    let ga = crate::ga::GA::new(3000, 200, 0.1);
+    let ga = crate::ga::GA::new(1000, 200, 0.1);
 
     let p_range = vec![(0.0, 10000.0), (0.0, 1.0), (0.0, 10000.0), (0.0, 10000.0)];
     let m_range = vec![(-5.0, 5.0), (-0.5, 0.5), (-5.0, 5.0), (-5.0, 5.0)];
