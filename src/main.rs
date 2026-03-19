@@ -7,6 +7,8 @@ mod utils;
 use chrono::Local;
 use csv::Writer;
 use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
+use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -15,6 +17,12 @@ use std::thread;
 use std::time::Duration;
 
 fn main() {
+    let worker_count = parse_worker_count();
+    ThreadPoolBuilder::new()
+        .num_threads(worker_count)
+        .build_global()
+        .unwrap_or_else(|e| panic!("Failed to configure Rayon thread pool: {}", e));
+
     let start = std::time::Instant::now();
 
     // Create output directory with timestamp
@@ -81,7 +89,6 @@ fn main() {
     // process_iteration(e_cf, var_cf, &mean, &cov);
 
     // Run parallel iterations with in-place per-thread progress display
-    let worker_count = rayon::current_num_threads();
     let thread_status = Arc::new(
         (0..worker_count)
             .map(|_| AtomicUsize::new(0))
@@ -208,6 +215,40 @@ fn main() {
     println!("Results saved to {}", filename);
     println!("Total time: {:?}", start.elapsed());
 }
+
+fn parse_worker_count() -> usize {
+    let mut args = env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--workers" || arg == "-w" {
+            let value = args.next().unwrap_or_else(|| {
+                eprintln!("Missing value for {}. Example: --workers 4", arg);
+                std::process::exit(1);
+            });
+
+            let workers = value.parse::<usize>().unwrap_or_else(|_| {
+                eprintln!("Invalid worker count '{}'. Please provide a positive integer.", value);
+                std::process::exit(1);
+            });
+
+            if workers == 0 {
+                eprintln!("Worker count must be greater than 0.");
+                std::process::exit(1);
+            }
+
+            println!("Using manually configured worker count: {}", workers);
+            return workers;
+        }
+    }
+
+    let default_workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    println!(
+        "No --workers specified, using logical processor count: {}",
+        default_workers
+    );
+    default_workers
+} 
 
 fn print_summary_statistics(results: &[Vec<f64>], headers: &[&str]) {
     if results.is_empty() {

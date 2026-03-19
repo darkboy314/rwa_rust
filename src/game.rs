@@ -3,8 +3,6 @@
 /// Stage 2: Stage One players (renewable energy generators)
 /// Stage 3: Stage Two players (electricity offtakers)
 use cobyla::{Func, RhoBeg, StopTols, minimize};
-use argmin::core::{CostFunction, Error as ArgminError, Executor};
-use argmin::solver::brent::BrentOpt;
 
 const T: f64 = 10.0; // Lifespan years
 const Q: f64 = 200.0; // Storage capacity (MWh)
@@ -82,11 +80,6 @@ impl StageOnePlayer {
     pub fn constraint(&self, up: &UpstreamPlayer, m1: f64) -> f64 {
         self.b - C_T - up.p1 * m1
     }
-
-    /// Market share calculation
-    pub fn m1(m_all: &[f64]) -> f64 {
-        m_all.iter().sum::<f64>()
-    }
 }
 
 impl StageTwoPlayer {
@@ -110,11 +103,6 @@ impl StageTwoPlayer {
     /// Constraint function
     pub fn constraint(&self, up: &UpstreamPlayer, m2: f64) -> f64 {
         self.b - C_T - up.p2 * m2
-    }
-
-    /// Market share calculation
-    pub fn m2(m_all: &[f64]) -> f64 {
-        m_all.iter().sum::<f64>()
     }
 }
 
@@ -188,8 +176,8 @@ where
 {
     let objective = |x: &[f64], _data: &mut ()| f(x[0]);
     let inequality = |x: &[f64], _data: &mut ()| constraint(x[0]);
-    let constraints: Vec<&dyn Func<()>> = vec![&inequality];
-    let x_init = vec![x0];
+    let constraints = [&inequality as &dyn Func<()>];
+    let x_init = [x0];
     let bounds = [(lb, ub)];
     let rho = if lb.is_finite() && ub.is_finite() {
         ((ub - lb).abs() * 0.25).max(tol * 10.0).max(1e-4)
@@ -217,86 +205,27 @@ where
     }
 }
 
-/// Constrained 1-D optimization using argmin BrentOpt via penalty method.
-pub fn alter_best_response_brent<F, C>(
-    f: F,
-    constraint: C,
-    x0: f64,
-    lb: f64,
-    ub: f64,
-    tol: f64,
-    max_iter: usize,
-) -> f64
-where
-    F: Fn(f64) -> f64 + Send + Sync,
-    C: Fn(f64) -> f64 + Send + Sync,
-{
-    struct PenalizedCost<'a, F, C> {
-        objective: &'a F,
-        constraint: &'a C,
-        penalty: f64,
-    }
-
-    impl<F, C> CostFunction for PenalizedCost<'_, F, C>
-    where
-        F: Fn(f64) -> f64 + Send + Sync,
-        C: Fn(f64) -> f64 + Send + Sync,
-    {
-        type Param = f64;
-        type Output = f64;
-
-        fn cost(&self, x: &Self::Param) -> Result<Self::Output, ArgminError> {
-            let base = (self.objective)(*x);
-            let c = (self.constraint)(*x);
-            let violation = (-c).max(0.0);
-            Ok(base + self.penalty * violation * violation)
-        }
-    }
-
-    let eps = tol.max(1e-9);
-    let span = x0.abs().max(1.0) * 10.0;
-    let (min_x, mut max_x) = match (lb.is_finite(), ub.is_finite()) {
-        (true, true) => (lb, ub),
-        (true, false) => (lb, (x0 + span).max(lb + eps)),
-        (false, true) => ((x0 - span).min(ub - eps), ub),
-        (false, false) => (x0 - span, x0 + span),
-    };
-
-    if min_x >= max_x {
-        max_x = min_x + eps;
-    }
-
-    let solver = BrentOpt::new(min_x, max_x);
-    let cost = PenalizedCost {
-        objective: &f,
-        constraint: &constraint,
-        penalty: 1e12,
-    };
-
-    match Executor::new(cost, solver)
-        .configure(|state| state.max_iters(max_iter.max(1) as u64))
-        .run()
-    {
-        Ok(result) => {
-            let state = result.state();
-            state.best_param.or(state.param).unwrap_or(x0)
-        }
-        Err(_) => x0,
-    }
-}
-
 /// Penalty function for genetic algorithm
 pub fn penalty_function(
     up: &UpstreamPlayer,
     params: &GameParams,
     x: &[f64],
-    m1: f64,
-    m2: f64,
+    s1player: &[StageOnePlayer],
+    s2player: &[StageTwoPlayer],
 ) -> f64 {
     let q = x[0];
     let r = x[1];
     let p1 = x[2];
     let p2 = x[3];
+
+    let reg1 = &s1player[0];
+    let reg2 = &s1player[1];
+
+    let oft1 = &s2player[0];
+    let oft2 = &s2player[1];
+
+    let m1 = reg1.m + reg2.m;
+    let m2 = oft1.m + oft2.m;
 
     -1e100
         * (up.cons_1(q, p1, m1).min(0.0)
@@ -336,20 +265,74 @@ pub fn start_game(
         sigma_dp,
         sigma_pv,
     };
+    // initialize lower player
+    let reg1 = StageOnePlayer::new(500.0, 1e10, 0.4);
+    let reg2 = StageOnePlayer::new(500.0, 1e10, 0.6);
+    let oft1 = StageTwoPlayer::new(500.0, 1e10, 0.3);
+    let oft2 = StageTwoPlayer::new(500.0, 1e10, 0.7);
 
-    // Initialize players
-    let mut reg1 = StageOnePlayer::new(500.0, 1e10, 0.4);
-    let mut reg2 = StageOnePlayer::new(500.0, 1e10, 0.6);
-    let mut oft1 = StageTwoPlayer::new(500.0, 1e10, 0.3);
-    let mut oft2 = StageTwoPlayer::new(500.0, 1e10, 0.7);
+    let player_list1 = [reg1, reg2];
+    let player_list2 = [oft1, oft2];
 
+    // initialize upper player
     let up = UpstreamPlayer::new(Q, R, 500.0, 500.0, 2, 2);
+
+    let ga = crate::ga::GA::new(1000, 200, 0.1);
+
+    let p_range = [(0.0, 1e10), (0.0, 1.0), (0.0, 1e10), (0.0, 1e10)];
+    let m_range = [(-5.0, 5.0), (-0.5, 0.5), (-5.0, 5.0), (-5.0, 5.0)];
+
+    let penalty_func = |x: &[f64]| penalty_function(&up, &params, x, &player_list1, &player_list2);
+    let obj_func = |x: &[f64]| {
+        game(
+            iter_range,
+            x[0],
+            x[1],
+            x[2],
+            x[3],
+            &params,
+            &player_list1,
+            &player_list2,
+        )
+    };
+
+    let (x, result) = ga.run(obj_func, Some(penalty_func), &p_range, &m_range);
+
+    (
+        player_list1[0].m,
+        player_list1[1].m,
+        player_list2[0].m,
+        player_list2[1].m,
+        x[0],
+        x[1],
+        x[2],
+        x[3],
+        result,
+    )
+}
+
+fn game(
+    iter_range: usize,
+    q: f64,
+    r: f64,
+    p1: f64,
+    p2: f64,
+    params: &GameParams,
+    s1player: &[StageOnePlayer],
+    s2player: &[StageTwoPlayer],
+) -> f64 {
+    let mut reg1 = StageOnePlayer::new(s1player[0].m, s1player[0].b, s1player[0].lbd);
+    let mut reg2 = StageOnePlayer::new(s1player[1].m, s1player[1].b, s1player[1].lbd);
+    let mut oft1 = StageTwoPlayer::new(s2player[0].m, s2player[0].b, s2player[0].gma);
+    let mut oft2 = StageTwoPlayer::new(s2player[1].m, s2player[1].b, s2player[1].gma);
+
+    let up = UpstreamPlayer { q, r, p1, p2, n_re: 2, n_of: 2 };
 
     // Low level game 2: Stage Two players (oft1, oft2)
     for _ in 0..iter_range {
         // oft1 optimizes against oft2 (fixed)
         let m21_new = alter_best_response(
-            |x| -oft1.mu(x, &up, &params, &[x, oft2.m]),
+            |x| -oft1.mu(x, &up, params, &[x, oft2.m]),
             |x| oft1.constraint(&up, x),
             oft1.m,
             0.0,
@@ -360,7 +343,7 @@ pub fn start_game(
 
         // oft2 optimizes against oft1 (fixed)
         let m22_new = alter_best_response(
-            |x| -oft2.mu(x, &up, &params, &[x, oft1.m]),
+            |x| -oft2.mu(x, &up, params, &[x, oft1.m]),
             |x| oft2.constraint(&up, x),
             oft2.m,
             0.0,
@@ -375,11 +358,11 @@ pub fn start_game(
 
     // Low level game 1: Stage One players (reg1, reg2)
     for _ in 0..iter_range {
-        let m2 = StageTwoPlayer::m2(&[oft1.m, oft2.m]);
+        let m2 = oft1.m + oft2.m;
 
         // reg1 optimizes against reg2 (fixed)
         let m11_new = alter_best_response(
-            |x| -reg1.theta(x, &up, &params, m2, &[x, reg2.m]),
+            |x| -reg1.theta(x, &up, params, m2, &[x, reg2.m]),
             |x| reg1.constraint(&up, x),
             reg1.m,
             0.0,
@@ -390,7 +373,7 @@ pub fn start_game(
 
         // reg2 optimizes against reg1 (fixed)
         let m12_new = alter_best_response(
-            |x| -reg2.theta(x, &up, &params, m2, &[x, reg1.m]),
+            |x| -reg2.theta(x, &up, params, m2, &[x, reg1.m]),
             |x| reg2.constraint(&up, x),
             reg2.m,
             0.0,
@@ -403,35 +386,8 @@ pub fn start_game(
         reg2.m = m12_new;
     }
 
-    let m1 = StageOnePlayer::m1(&[reg1.m, reg2.m]);
-    let m2 = StageTwoPlayer::m2(&[oft1.m, oft2.m]);
+    let m1 = reg1.m + reg2.m;
+    let m2 = oft1.m + oft2.m;
 
-    // Upper level game: Use genetic algorithm to optimize upstream player parameters
-    let ga = crate::ga::GA::new(1000, 200, 0.1);
-
-    let p_range = vec![(0.0, 10000.0), (0.0, 1.0), (0.0, 10000.0), (0.0, 10000.0)];
-    let m_range = vec![(-5.0, 5.0), (-0.5, 0.5), (-5.0, 5.0), (-5.0, 5.0)];
-
-    let penalty_func = |x: &[f64]| penalty_function(&up, &params, x, m1, m2);
-    let obj_func = |x: &[f64]| up.pi_ess(&params, m1, m2, x);
-
-    let (x, result) = ga.run(obj_func, Some(penalty_func), &p_range, &m_range);
-
-    // if x.iter().any(|&val| val.is_nan()) {
-    //     return (
-    //         reg1.m,
-    //         reg2.m,
-    //         oft1.m,
-    //         oft2.m,
-    //         f64::NAN,
-    //         f64::NAN,
-    //         f64::NAN,
-    //         f64::NAN,
-    //         f64::NAN,
-    //     );
-    // }
-
-    (
-        reg1.m, reg2.m, oft1.m, oft2.m, x[0], x[1], x[2], x[3], result,
-    )
+    up.pi_ess(params, m1, m2, &[q, r, p1, p2])
 }
