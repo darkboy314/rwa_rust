@@ -1,6 +1,3 @@
-#[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
 mod distribution;
 mod ga;
 mod game;
@@ -9,6 +6,7 @@ mod utils;
 
 use chrono::Local;
 use csv::Writer;
+use mimalloc::MiMalloc;
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 use std::env;
@@ -18,6 +16,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 #[derive(Clone, Debug)]
 struct RunningStats {
