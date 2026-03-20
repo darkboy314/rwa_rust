@@ -1,7 +1,48 @@
 {
-    // Use IntelliSense to learn about possible attributes.
-    // Hover to view descriptions of existing attributes.
-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
-    "configurations": []
+    "configurations": [
+        {
+            "name": "RWA: Single-Thread Debug",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin",
+                    "rwa_rust",
+                    "--package",
+                    "rwa_rust"
+                ],
+                "filter": {
+                    "name": "rwa_rust",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "--workers",
+                "1"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "RWA: Multi-Thread Run",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin",
+                    "rwa_rust",
+                    "--package",
+                    "rwa_rust"
+                ],
+                "filter": {
+                    "name": "rwa_rust",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
 }

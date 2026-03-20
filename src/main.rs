@@ -1,3 +1,6 @@
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod distribution;
 mod ga;
 mod game;
@@ -23,6 +26,11 @@ struct RunningStats {
     m2: f64,
     min: f64,
     max: f64,
+}
+
+#[derive(Clone, Debug)]
+struct RunConfig {
+    worker_count: usize,
 }
 
 impl RunningStats {
@@ -62,7 +70,8 @@ impl RunningStats {
 }
 
 fn main() {
-    let worker_count = parse_worker_count();
+    let run_config = parse_run_config();
+    let worker_count = run_config.worker_count;
     ThreadPoolBuilder::new()
         .num_threads(worker_count)
         .build_global()
@@ -126,7 +135,7 @@ fn main() {
         ],
     ];
 
-    let total_iterations = 10000usize;
+    let total_iterations = 100usize;
     println!(
         "Starting RWA simulation with {} iterations...",
         total_iterations
@@ -174,7 +183,7 @@ fn main() {
     let reporter_status = Arc::clone(&thread_status);
     let reporter_completed = Arc::clone(&completed_count);
     let reporter_stop = Arc::clone(&stop_progress);
-    let reporter = thread::spawn(move || {
+    let reporter = Some(thread::spawn(move || {
         let mut stdout = io::stdout();
 
         loop {
@@ -203,7 +212,7 @@ fn main() {
 
             thread::sleep(Duration::from_millis(120));
         }
-    });
+    }));
 
     let worker_status = Arc::clone(&thread_status);
     let worker_completed = Arc::clone(&completed_count);
@@ -214,11 +223,11 @@ fn main() {
     let worker_plot_err = Arc::clone(&plot_error_count);
 
     // Stream processing: compute -> write -> plot, per iteration
-    (0..total_iterations).into_par_iter().for_each(|i| {
-        if let Some(tid) = rayon::current_thread_index() {
+    let run_iteration = |i: usize, thread_id: Option<usize>| {
+        if let Some(tid) = thread_id {
             worker_status[tid].store(i + 1, Ordering::Relaxed);
         }
-        
+
         let (result_data, price_sample, cost_sample) = process_iteration(e_cf, var_cf, &mean, &cov);
 
         // Update running stats
@@ -271,11 +280,17 @@ fn main() {
         }
 
         worker_completed.fetch_add(1, Ordering::Relaxed);
-    });
+    };
+
+    (0..total_iterations)
+        .into_par_iter()
+        .for_each(|i| run_iteration(i, rayon::current_thread_index()));
 
     stop_progress.store(true, Ordering::Relaxed);
-    let _ = reporter.join();
-    println!();
+    if let Some(handle) = reporter {
+        let _ = handle.join();
+        println!();
+    }
 
     // Flush CSV
     if let Ok(mut w) = writers.lock() {
@@ -314,8 +329,10 @@ fn main() {
     println!("Total time: {:?}", start.elapsed());
 }
 
-fn parse_worker_count() -> usize {
+fn parse_run_config() -> RunConfig {
     let mut args = env::args().skip(1);
+    let mut worker_count: Option<usize> = None;
+
     while let Some(arg) = args.next() {
         if arg == "--workers" || arg == "-w" {
             let value = args.next().unwrap_or_else(|| {
@@ -335,10 +352,15 @@ fn parse_worker_count() -> usize {
                 eprintln!("Worker count must be greater than 0.");
                 std::process::exit(1);
             }
-
-            println!("Using manually configured worker count: {}", workers);
-            return workers;
+            worker_count = Some(workers);
         }
+    }
+
+    if let Some(workers) = worker_count {
+        println!("Using manually configured worker count: {}", workers);
+        return RunConfig {
+            worker_count: workers,
+        };
     }
 
     let default_workers = std::thread::available_parallelism()
@@ -348,7 +370,9 @@ fn parse_worker_count() -> usize {
         "No --workers specified, using logical processor count: {}",
         default_workers
     );
-    default_workers
+    RunConfig {
+        worker_count: default_workers,
+    }
 }
 
 fn print_summary_statistics(stats: &[RunningStats], headers: &[&str], total_iterations: usize) {
@@ -381,9 +405,9 @@ fn process_iteration(
     cov: &[Vec<f64>],
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     // Generate samples
-    let cf = distribution::operation_cost_gamma(100, e_cf, var_cf, Some(0));
+    let cf = distribution::operation_cost_gamma(100, e_cf, var_cf, None);
     let (d_samples, p_samples, v_samples) =
-        distribution::sample_multivariate_lognormal(100, mean, cov, Some(0));
+        distribution::sample_multivariate_lognormal(100, mean, cov, None);
 
     // Calculate statistics
     let mean_d = utils::mean(&d_samples);

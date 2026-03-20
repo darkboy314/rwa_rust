@@ -2,14 +2,24 @@
 /// Stage 1: Upstream player (energy storage provider)
 /// Stage 2: Stage One players (renewable energy generators)
 /// Stage 3: Stage Two players (electricity offtakers)
-use cobyla::{Func, RhoBeg, StopTols, minimize};
+use argmin::core::{CostFunction, Error, Executor};
+use argmin::solver::brent::BrentOpt;
+use std::sync::{Arc, Mutex};
 
 const T: f64 = 10.0; // Lifespan years
 const Q: f64 = 200.0; // Storage capacity (MWh)
 const R: f64 = 0.2; // Profit sharing ratio
 const C_T: f64 = 100.0; // Transaction cost ($)
-const K: f64 = 584000.0; // Development cost per unit ($/MWh) 
+const K: f64 = 580000.0; // Development cost per unit ($/MWh) 
 const F: f64 = 1700.0; // Sales price per unit ($/MWh)
+
+pub struct ResultStruct {
+    pub f: f64,
+    pub reg1_m: f64,
+    pub reg2_m: f64,
+    pub oft1_m: f64,
+    pub oft2_m: f64,
+}
 
 pub struct GameParams {
     /// Expected demand
@@ -128,11 +138,11 @@ impl UpstreamPlayer {
     }
 
     /// Objective function
-    pub fn pi_ess(&self, params: &GameParams, m1: f64, m2: f64, args: &[f64]) -> f64 {
-        let q = args[0];
-        let r = args[1];
-        let p1 = args[2];
-        let p2 = args[3];
+    pub fn pi_ess(&self, params: &GameParams, m1: f64, m2: f64) -> f64 {
+        let q = self.q;
+        let r = self.r;
+        let p1 = self.p1;
+        let p2 = self.p2;
         p1 * m1 + (1.0 - r) * (p2 * m2 - T * q * params.e_cf)
             - (self.n_re + self.n_of) as f64 * C_T
             - K * q
@@ -160,7 +170,20 @@ impl UpstreamPlayer {
     }
 }
 
-/// Constrained 1-D optimization using COBYLA.
+struct OneDCost<F>(F);
+
+impl<F: Fn(f64) -> f64> CostFunction for OneDCost<F> {
+    type Param = f64;
+    type Output = f64;
+    fn cost(&self, p: &f64) -> Result<f64, Error> {
+        Ok((self.0)(*p))
+    }
+}
+
+/// Constrained 1-D minimization using Brent's method (pure Rust, jemalloc-safe).
+/// The constraint `c(x) >= 0` is a linear budget constraint of the form
+/// `b - C_T - price * x >= 0`, which gives a closed-form upper bound
+/// `x <= (b - C_T) / price`. That bound is folded into `ub` here.
 pub fn alter_best_response<F, C>(
     f: F,
     constraint: C,
@@ -171,37 +194,53 @@ pub fn alter_best_response<F, C>(
     max_iter: usize,
 ) -> f64
 where
-    F: Fn(f64) -> f64 + Send + Sync,
-    C: Fn(f64) -> f64 + Send + Sync,
+    F: Fn(f64) -> f64,
+    C: Fn(f64) -> f64,
 {
-    let objective = |x: &[f64], _data: &mut ()| f(x[0]);
-    let inequality = |x: &[f64], _data: &mut ()| constraint(x[0]);
-    let constraints = [&inequality as &dyn Func<()>];
-    let x_init = [x0];
-    let bounds = [(lb, ub)];
-    let rho = if lb.is_finite() && ub.is_finite() {
-        ((ub - lb).abs() * 0.25).max(tol * 10.0).max(1e-4)
+    // Fold the linear constraint into an upper bound by binary search.
+    // constraint(x) >= 0 means x is feasible; find the largest feasible ub.
+    let effective_ub = if constraint(lb) < 0.0 {
+        // Even lb is infeasible: return lb as fallback.
+        return lb;
     } else {
-        x0.abs().max(1.0).max(tol * 10.0)
-    };
-    let stop_tol = StopTols {
-        xtol_abs: vec![tol.max(1e-9)],
-        ftol_rel: tol.max(1e-9),
-        ..StopTols::default()
+        // Find where constraint flips sign in [lb, ub].
+        let raw_ub = if ub.is_finite() { ub } else { 1e12_f64 };
+        if constraint(raw_ub) >= 0.0 {
+            raw_ub
+        } else {
+            // Bisect to find the feasibility boundary.
+            let mut lo = lb;
+            let mut hi = raw_ub;
+            for _ in 0..60 {
+                let mid = (lo + hi) * 0.5;
+                if constraint(mid) >= 0.0 {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+                if hi - lo < tol {
+                    break;
+                }
+            }
+            lo
+        }
     };
 
-    match minimize(
-        objective,
-        &x_init,
-        &bounds,
-        &constraints,
-        (),
-        max_iter.max(1),
-        RhoBeg::All(rho),
-        Some(stop_tol),
-    ) {
-        Ok((_status, x_opt, _y_opt)) => x_opt[0],
-        Err((_status, x_opt, _y_opt)) => x_opt[0],
+    if effective_ub <= lb {
+        return lb;
+    }
+
+    // Clamp initial point into the feasible interval.
+    let init = x0.clamp(lb, effective_ub);
+
+    let problem = OneDCost(f);
+    let solver = BrentOpt::new(lb, effective_ub).set_tolerance(tol, tol);
+    match Executor::new(problem, solver)
+        .configure(|s| s.param(init).max_iters(max_iter as u64))
+        .run()
+    {
+        Ok(res) => res.state().best_param.unwrap_or(init),
+        Err(_) => init,
     }
 }
 
@@ -210,22 +249,14 @@ pub fn penalty_function(
     up: &UpstreamPlayer,
     params: &GameParams,
     x: &[f64],
-    s1player: &[StageOnePlayer],
-    s2player: &[StageTwoPlayer],
+    result: &ResultStruct,
 ) -> f64 {
     let q = x[0];
     let r = x[1];
     let p1 = x[2];
     let p2 = x[3];
-
-    let reg1 = &s1player[0];
-    let reg2 = &s1player[1];
-
-    let oft1 = &s2player[0];
-    let oft2 = &s2player[1];
-
-    let m1 = reg1.m + reg2.m;
-    let m2 = oft1.m + oft2.m;
+    let m1 = result.reg1_m + result.reg2_m;
+    let m2 = result.oft1_m + result.oft2_m;
 
     -1e100
         * (up.cons_1(q, p1, m1).min(0.0)
@@ -265,43 +296,56 @@ pub fn start_game(
         sigma_dp,
         sigma_pv,
     };
-    // initialize lower player
-    let mut reg1 = StageOnePlayer::new(500.0, 1e10, 0.4);
-    let mut reg2 = StageOnePlayer::new(500.0, 1e10, 0.6);
-    let mut oft1 = StageTwoPlayer::new(500.0, 1e10, 0.3);
-    let mut oft2 = StageTwoPlayer::new(500.0, 1e10, 0.7);
 
-    let player_list1 = [
-        StageOnePlayer::new(reg1.m, reg1.b, reg1.lbd),
-        StageOnePlayer::new(reg2.m, reg2.b, reg2.lbd),
-    ];
-    let player_list2 = [
-        StageTwoPlayer::new(oft1.m, oft1.b, oft1.gma),
-        StageTwoPlayer::new(oft2.m, oft2.b, oft2.gma),
-    ];
+    // initialize lower player
+    let reg1 = StageOnePlayer::new(500.0, 1e10, 0.4);
+    let reg2 = StageOnePlayer::new(500.0, 1e10, 0.6);
+    let oft1 = StageTwoPlayer::new(500.0, 1e10, 0.3);
+    let oft2 = StageTwoPlayer::new(500.0, 1e10, 0.7);
 
     // initialize upper player
     let ga = crate::ga::GA::new(500, 40, 0.2);
 
-    let p_range = [(0.0, 1000.0), (0.0, 1.0), (0.0, 10000000.0), (0.0, 10000000.0)];
-    let m_range = [(-5.0, 5.0), (-0.5, 0.5), (-500.0, 500.0), (-500.0, 500.0)];
+    let p_range = [
+        (0.0, 10000.0),
+        (0.0, 1.0),
+        (0.0, 10000000.0),
+        (0.0, 10000000.0),
+    ];
+    let m_range = [(-50.0, 50.0), (-0.5, 0.5), (-500.0, 500.0), (-500.0, 500.0)];
+
+    let result_state = Arc::new(Mutex::new(ResultStruct {
+        f: 0.0,
+        reg1_m: reg1.m,
+        reg2_m: reg2.m,
+        oft1_m: oft1.m,
+        oft2_m: oft2.m,
+    }));
+
+    let penalty_state = Arc::clone(&result_state);
 
     let penalty_func = |x: &[f64]| {
+        let state = penalty_state
+            .lock()
+            .expect("Failed to lock result state in penalty_func");
+
         penalty_function(
             &UpstreamPlayer::new(x[0], x[1], x[2], x[3], 2, 2),
             &params,
             x,
-            &player_list1,
-            &player_list2,
+            &state,
         )
     };
+
+    let obj_state = Arc::clone(&result_state);
+
     let obj_func = |x: &[f64]| {
         let mut reg1_eval = StageOnePlayer::new(reg1.m, reg1.b, reg1.lbd);
         let mut reg2_eval = StageOnePlayer::new(reg2.m, reg2.b, reg2.lbd);
         let mut oft1_eval = StageTwoPlayer::new(oft1.m, oft1.b, oft1.gma);
         let mut oft2_eval = StageTwoPlayer::new(oft2.m, oft2.b, oft2.gma);
 
-        game(
+        let res = game(
             iter_range,
             x[0],
             x[1],
@@ -312,21 +356,64 @@ pub fn start_game(
             &mut reg2_eval,
             &mut oft1_eval,
             &mut oft2_eval,
-        )
+        );
+
+        {
+            let mut state = obj_state
+                .lock()
+                .expect("Failed to lock result state in obj_func");
+            *state = ResultStruct {
+                f: res.f,
+                reg1_m: res.reg1_m,
+                reg2_m: res.reg2_m,
+                oft1_m: res.oft1_m,
+                oft2_m: res.oft2_m,
+            };
+        }
+
+        -res.f
     };
 
     let (x, ga_result) = ga.run(obj_func, Some(penalty_func), &p_range, &m_range);
 
+    let final_result = if x.iter().all(|v| v.is_finite()) {
+        let mut reg1_final = StageOnePlayer::new(reg1.m, reg1.b, reg1.lbd);
+        let mut reg2_final = StageOnePlayer::new(reg2.m, reg2.b, reg2.lbd);
+        let mut oft1_final = StageTwoPlayer::new(oft1.m, oft1.b, oft1.gma);
+        let mut oft2_final = StageTwoPlayer::new(oft2.m, oft2.b, oft2.gma);
+
+        game(
+            iter_range,
+            x[0],
+            x[1],
+            x[2],
+            x[3],
+            &params,
+            &mut reg1_final,
+            &mut reg2_final,
+            &mut oft1_final,
+            &mut oft2_final,
+        )
+    } else {
+        ResultStruct {
+            f: ga_result,
+            reg1_m: f64::NAN,
+            reg2_m: f64::NAN,
+            oft1_m: f64::NAN,
+            oft2_m: f64::NAN,
+        }
+    };
+
     (
-        reg1.m,
-        reg2.m,
-        oft1.m,
-        oft2.m,
+        final_result.reg1_m,
+        final_result.reg2_m,
+        final_result.oft1_m,
+        final_result.oft2_m,
         x[0],
         x[1],
         x[2],
         x[3],
-        ga_result,
+        -ga_result,
     )
 }
 
@@ -341,7 +428,7 @@ fn game(
     reg2: &mut StageOnePlayer,
     oft1: &mut StageTwoPlayer,
     oft2: &mut StageTwoPlayer,
-) -> f64 {
+) -> ResultStruct {
     let up = UpstreamPlayer {
         q,
         r,
@@ -359,7 +446,7 @@ fn game(
             |x| oft1.constraint(&up, x),
             oft1.m,
             0.0,
-            f64::INFINITY,
+            1e10,
             1e-2,
             20,
         );
@@ -370,7 +457,7 @@ fn game(
             |x| oft2.constraint(&up, x),
             oft2.m,
             0.0,
-            f64::INFINITY,
+            1e10,
             1e-2,
             20,
         );
@@ -387,7 +474,7 @@ fn game(
             |x| reg1.constraint(&up, x),
             reg1.m,
             0.0,
-            f64::INFINITY,
+            1e10,
             1e-2,
             20,
         );
@@ -398,7 +485,7 @@ fn game(
             |x| reg2.constraint(&up, x),
             reg2.m,
             0.0,
-            f64::INFINITY,
+            1e10,
             1e-2,
             20,
         );
@@ -410,5 +497,13 @@ fn game(
     let m1 = reg1.m + reg2.m;
     let m2 = oft1.m + oft2.m;
 
-    up.pi_ess(params, m1, m2, &[q, r, p1, p2])
+    let f = up.pi_ess(params, m1, m2);
+
+    ResultStruct {
+        f,
+        reg1_m: reg1.m,
+        reg2_m: reg2.m,
+        oft1_m: oft1.m,
+        oft2_m: oft2.m,
+    }
 }

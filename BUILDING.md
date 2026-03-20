@@ -259,6 +259,9 @@ RUST_BACKTRACE=full cargo run --release
 # Linux: gdb (sudo apt install gdb)
 # Windows: Visual Studio Debugger
 
+# VS Code single-step debug entry (single-thread)
+cargo run -- --single-thread-debug
+
 # Run with debugger
 rust-gdb ./target/release/rwa
 ```

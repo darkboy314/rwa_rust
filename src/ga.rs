@@ -57,9 +57,8 @@ impl GA {
                 })
                 .collect();
 
-            scored_population.sort_unstable_by(|a, b| {
-                b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal)
-            });
+            scored_population
+                .sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
             scored_population.truncate(self.pop_size);
 
             population = scored_population
@@ -129,7 +128,6 @@ impl GA {
                     .zip(p2.iter())
                     .zip(m_range.iter())
                     .map(|((a, b), (min_mut, max_mut))| {
-
                         let min = a.min(*b);
                         let range = (a - b).abs();
                         let mut gene = min + rng.random::<f64>() * range;
@@ -163,7 +161,6 @@ impl GA {
 
         penalty
     }
-
 }
 
 #[cfg(test)]
@@ -185,12 +182,7 @@ mod tests {
 
         let mut best_value = f64::INFINITY;
         for _ in 0..10 {
-            let (_best_x, value) = ga.run(
-                eggholder,
-                None::<fn(&[f64]) -> f64>,
-                &p_range,
-                &m_range,
-            );
+            let (_best_x, value) = ga.run(eggholder, None::<fn(&[f64]) -> f64>, &p_range, &m_range);
             if value < best_value {
                 best_value = value;
             }
