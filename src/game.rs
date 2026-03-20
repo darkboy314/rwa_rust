@@ -266,24 +266,41 @@ pub fn start_game(
         sigma_pv,
     };
     // initialize lower player
-    let reg1 = StageOnePlayer::new(500.0, 1e10, 0.4);
-    let reg2 = StageOnePlayer::new(500.0, 1e10, 0.6);
-    let oft1 = StageTwoPlayer::new(500.0, 1e10, 0.3);
-    let oft2 = StageTwoPlayer::new(500.0, 1e10, 0.7);
+    let mut reg1 = StageOnePlayer::new(500.0, 1e10, 0.4);
+    let mut reg2 = StageOnePlayer::new(500.0, 1e10, 0.6);
+    let mut oft1 = StageTwoPlayer::new(500.0, 1e10, 0.3);
+    let mut oft2 = StageTwoPlayer::new(500.0, 1e10, 0.7);
 
-    let player_list1 = [reg1, reg2];
-    let player_list2 = [oft1, oft2];
+    let player_list1 = [
+        StageOnePlayer::new(reg1.m, reg1.b, reg1.lbd),
+        StageOnePlayer::new(reg2.m, reg2.b, reg2.lbd),
+    ];
+    let player_list2 = [
+        StageTwoPlayer::new(oft1.m, oft1.b, oft1.gma),
+        StageTwoPlayer::new(oft2.m, oft2.b, oft2.gma),
+    ];
 
     // initialize upper player
-    let up = UpstreamPlayer::new(Q, R, 500.0, 500.0, 2, 2);
+    let ga = crate::ga::GA::new(500, 40, 0.2);
 
-    let ga = crate::ga::GA::new(1000, 200, 0.1);
+    let p_range = [(0.0, 1000.0), (0.0, 1.0), (0.0, 10000000.0), (0.0, 10000000.0)];
+    let m_range = [(-5.0, 5.0), (-0.5, 0.5), (-500.0, 500.0), (-500.0, 500.0)];
 
-    let p_range = [(0.0, 1e10), (0.0, 1.0), (0.0, 1e10), (0.0, 1e10)];
-    let m_range = [(-5.0, 5.0), (-0.5, 0.5), (-5.0, 5.0), (-5.0, 5.0)];
-
-    let penalty_func = |x: &[f64]| penalty_function(&up, &params, x, &player_list1, &player_list2);
+    let penalty_func = |x: &[f64]| {
+        penalty_function(
+            &UpstreamPlayer::new(x[0], x[1], x[2], x[3], 2, 2),
+            &params,
+            x,
+            &player_list1,
+            &player_list2,
+        )
+    };
     let obj_func = |x: &[f64]| {
+        let mut reg1_eval = StageOnePlayer::new(reg1.m, reg1.b, reg1.lbd);
+        let mut reg2_eval = StageOnePlayer::new(reg2.m, reg2.b, reg2.lbd);
+        let mut oft1_eval = StageTwoPlayer::new(oft1.m, oft1.b, oft1.gma);
+        let mut oft2_eval = StageTwoPlayer::new(oft2.m, oft2.b, oft2.gma);
+
         game(
             iter_range,
             x[0],
@@ -291,23 +308,25 @@ pub fn start_game(
             x[2],
             x[3],
             &params,
-            &player_list1,
-            &player_list2,
+            &mut reg1_eval,
+            &mut reg2_eval,
+            &mut oft1_eval,
+            &mut oft2_eval,
         )
     };
 
-    let (x, result) = ga.run(obj_func, Some(penalty_func), &p_range, &m_range);
+    let (x, ga_result) = ga.run(obj_func, Some(penalty_func), &p_range, &m_range);
 
     (
-        player_list1[0].m,
-        player_list1[1].m,
-        player_list2[0].m,
-        player_list2[1].m,
+        reg1.m,
+        reg2.m,
+        oft1.m,
+        oft2.m,
         x[0],
         x[1],
         x[2],
         x[3],
-        result,
+        ga_result,
     )
 }
 
@@ -318,15 +337,19 @@ fn game(
     p1: f64,
     p2: f64,
     params: &GameParams,
-    s1player: &[StageOnePlayer],
-    s2player: &[StageTwoPlayer],
+    reg1: &mut StageOnePlayer,
+    reg2: &mut StageOnePlayer,
+    oft1: &mut StageTwoPlayer,
+    oft2: &mut StageTwoPlayer,
 ) -> f64 {
-    let mut reg1 = StageOnePlayer::new(s1player[0].m, s1player[0].b, s1player[0].lbd);
-    let mut reg2 = StageOnePlayer::new(s1player[1].m, s1player[1].b, s1player[1].lbd);
-    let mut oft1 = StageTwoPlayer::new(s2player[0].m, s2player[0].b, s2player[0].gma);
-    let mut oft2 = StageTwoPlayer::new(s2player[1].m, s2player[1].b, s2player[1].gma);
-
-    let up = UpstreamPlayer { q, r, p1, p2, n_re: 2, n_of: 2 };
+    let up = UpstreamPlayer {
+        q,
+        r,
+        p1,
+        p2,
+        n_re: 2,
+        n_of: 2,
+    };
 
     // Low level game 2: Stage Two players (oft1, oft2)
     for _ in 0..iter_range {
@@ -337,8 +360,8 @@ fn game(
             oft1.m,
             0.0,
             f64::INFINITY,
-            1e-6,
-            100,
+            1e-2,
+            20,
         );
 
         // oft2 optimizes against oft1 (fixed)
@@ -348,16 +371,14 @@ fn game(
             oft2.m,
             0.0,
             f64::INFINITY,
-            1e-6,
-            100,
+            1e-2,
+            20,
         );
 
         oft1.m = m21_new;
         oft2.m = m22_new;
-    }
 
-    // Low level game 1: Stage One players (reg1, reg2)
-    for _ in 0..iter_range {
+        // Low level game 1: Stage One players (reg1, reg2)
         let m2 = oft1.m + oft2.m;
 
         // reg1 optimizes against reg2 (fixed)
@@ -367,8 +388,8 @@ fn game(
             reg1.m,
             0.0,
             f64::INFINITY,
-            1e-6,
-            100,
+            1e-2,
+            20,
         );
 
         // reg2 optimizes against reg1 (fixed)
@@ -378,8 +399,8 @@ fn game(
             reg2.m,
             0.0,
             f64::INFINITY,
-            1e-6,
-            100,
+            1e-2,
+            20,
         );
 
         reg1.m = m11_new;

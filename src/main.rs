@@ -6,15 +6,60 @@ mod utils;
 
 use chrono::Local;
 use csv::Writer;
-use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
+use rayon::prelude::*;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+#[derive(Clone, Debug)]
+struct RunningStats {
+    n: usize,
+    mean: f64,
+    m2: f64,
+    min: f64,
+    max: f64,
+}
+
+impl RunningStats {
+    fn new() -> Self {
+        Self {
+            n: 0,
+            mean: 0.0,
+            m2: 0.0,
+            min: f64::INFINITY,
+            max: f64::NEG_INFINITY,
+        }
+    }
+
+    fn update(&mut self, x: f64) {
+        self.n += 1;
+        let n_f = self.n as f64;
+        let delta = x - self.mean;
+        self.mean += delta / n_f;
+        let delta2 = x - self.mean;
+        self.m2 += delta * delta2;
+
+        if x < self.min {
+            self.min = x;
+        }
+        if x > self.max {
+            self.max = x;
+        }
+    }
+
+    fn std_dev(&self) -> f64 {
+        if self.n > 1 {
+            (self.m2 / (self.n as f64 - 1.0)).sqrt()
+        } else {
+            0.0
+        }
+    }
+}
 
 fn main() {
     let worker_count = parse_worker_count();
@@ -30,8 +75,10 @@ fn main() {
     let output_dir = format!("./output/{}", timestamp);
     fs::create_dir_all(format!("{}/figure-1", output_dir)).expect("Failed to create figure-1 dir");
     fs::create_dir_all(format!("{}/figure-2", output_dir)).expect("Failed to create figure-2 dir");
+    fs::create_dir_all("./output").expect("Failed to create output dir");
 
     let filename = format!("{}/result.csv", output_dir);
+    let global_filename = "./output/result.csv".to_string();
 
     // Create CSV headers
     let headers = vec![
@@ -56,8 +103,8 @@ fn main() {
     let rho_pv = 0.3;
     let rho_dv = 0.2;
 
-    let e_cf = 50.0; // For REVB E_cf' = 1.5 * E_cf
-    let var_cf = 10.0; //or REVB Var_cf' = 4 * Var_cf (2^2)
+    let e_cf = 50.0;
+    let var_cf = 10.0;
 
     // Build covariance matrix
     let mean = vec![mu_d, mu_p, mu_v];
@@ -85,10 +132,27 @@ fn main() {
         total_iterations
     );
 
-    // Run in single thread for testing
-    // process_iteration(e_cf, var_cf, &mean, &cov);
+    // Shared CSV writers (timestamped + global), write header once
+    let writers = Arc::new(Mutex::new((
+        Writer::from_path(&filename).expect("Failed to open timestamped CSV"),
+        Writer::from_path(&global_filename).expect("Failed to open global CSV"),
+    )));
+    {
+        let mut guard = writers.lock().expect("Failed to lock writers");
+        guard
+            .0
+            .write_record(&headers)
+            .expect("Failed to write timestamped CSV header");
+        guard
+            .1
+            .write_record(&headers)
+            .expect("Failed to write global CSV header");
+    }
 
-    // Run parallel iterations with in-place per-thread progress display
+    // Running stats (no full in-memory results)
+    let stats = Arc::new(Mutex::new(vec![RunningStats::new(); headers.len()]));
+
+    // Progress
     let thread_status = Arc::new(
         (0..worker_count)
             .map(|_| AtomicUsize::new(0))
@@ -96,6 +160,10 @@ fn main() {
     );
     let completed_count = Arc::new(AtomicUsize::new(0));
     let stop_progress = Arc::new(AtomicBool::new(false));
+
+    let skipped_figure_count = Arc::new(AtomicUsize::new(0));
+    let csv_error_count = Arc::new(AtomicUsize::new(0));
+    let plot_error_count = Arc::new(AtomicUsize::new(0));
 
     let progress_lines = worker_count + 1;
     println!("Overall progress: 0/{}", total_iterations);
@@ -139,43 +207,56 @@ fn main() {
 
     let worker_status = Arc::clone(&thread_status);
     let worker_completed = Arc::clone(&completed_count);
+    let worker_writers = Arc::clone(&writers);
+    let worker_stats = Arc::clone(&stats);
+    let worker_skipped = Arc::clone(&skipped_figure_count);
+    let worker_csv_err = Arc::clone(&csv_error_count);
+    let worker_plot_err = Arc::clone(&plot_error_count);
 
-    let iteration_results: Vec<(Vec<f64>, Vec<f64>, Vec<f64>)> = (0..total_iterations)
-        .into_par_iter()
-        .map(|i| {
-            if let Some(tid) = rayon::current_thread_index() {
-                worker_status[tid].store(i + 1, Ordering::Relaxed);
+    // Stream processing: compute -> write -> plot, per iteration
+    (0..total_iterations).into_par_iter().for_each(|i| {
+        if let Some(tid) = rayon::current_thread_index() {
+            worker_status[tid].store(i + 1, Ordering::Relaxed);
+        }
+        
+        let (result_data, price_sample, cost_sample) = process_iteration(e_cf, var_cf, &mean, &cov);
+
+        // Update running stats
+        if let Ok(mut s) = worker_stats.lock() {
+            for (j, value) in result_data.iter().enumerate() {
+                if let Some(col) = s.get_mut(j) {
+                    col.update(*value);
+                }
             }
+        }
 
-            let out = process_iteration(e_cf, var_cf, &mean, &cov);
-            worker_completed.fetch_add(1, Ordering::Relaxed);
-            out
-        })
-        .collect();
+        // Write CSV row immediately and flush to disk so data survives interrupts
+        let row_str: Vec<String> = result_data.iter().map(|v| v.to_string()).collect();
+        match worker_writers.lock() {
+            Ok(mut w) => {
+                let write_ok = w.0.write_record(&row_str).is_ok()
+                    && w.0.flush().is_ok()
+                    && w.1.write_record(&row_str).is_ok()
+                    && w.1.flush().is_ok();
+                if !write_ok {
+                    worker_csv_err.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            Err(_) => {
+                worker_csv_err.fetch_add(1, Ordering::Relaxed);
+            }
+        }
 
-    stop_progress.store(true, Ordering::Relaxed);
-    let _ = reporter.join();
-    println!();
-
-    // Separate results and save one figure pair for each iteration
-    let mut results: Vec<Vec<f64>> = Vec::with_capacity(10000);
-    let mut skipped_figure_count = 0usize;
-
-    for (idx, (result_data, price_sample, cost_sample)) in iteration_results.into_iter().enumerate() {
-        results.push(result_data.clone());
-
+        // Plot immediately
         let q = result_data[16];
         let r = result_data[17];
         let p1 = result_data[18];
         let p2 = result_data[19];
 
         if !(q.is_finite() && r.is_finite() && p1.is_finite() && p2.is_finite()) {
-            skipped_figure_count += 1;
-            continue;
-        }
-
-        if let Err(e) = plotting::save_iteration_figures(
-            idx,
+            worker_skipped.fetch_add(1, Ordering::Relaxed);
+        } else if plotting::save_iteration_figures(
+            i,
             &price_sample,
             &cost_sample,
             mu_p,
@@ -183,34 +264,51 @@ fn main() {
             e_cf,
             var_cf,
             &output_dir,
-        ) {
-            println!("Warning: Failed to generate figures for iteration {}: {}", idx, e);
+        )
+        .is_err()
+        {
+            worker_plot_err.fetch_add(1, Ordering::Relaxed);
+        }
+
+        worker_completed.fetch_add(1, Ordering::Relaxed);
+    });
+
+    stop_progress.store(true, Ordering::Relaxed);
+    let _ = reporter.join();
+    println!();
+
+    // Flush CSV
+    if let Ok(mut w) = writers.lock() {
+        if w.0.flush().is_err() || w.1.flush().is_err() {
+            println!("Warning: failed to flush CSV writers.");
         }
     }
 
-    let global_filename = "./output/result.csv".to_string();
-
-    // Write results to both timestamped and global CSV files
-    if let Err(e) = write_results(&results, &headers, &filename) {
-        println!("Error writing results to timestamped CSV: {}", e);
-        return;
-    }
-
-    if let Err(e) = write_results(&results, &headers, &global_filename) {
-        println!("Error writing results to global CSV: {}", e);
-    } else {
-        println!("Global results also saved to {}", global_filename);
-    }
-
+    println!("Global results also saved to {}", global_filename);
     println!("Figure 1 files saved to {}/figure-1", output_dir);
     println!("Figure 2 files saved to {}/figure-2", output_dir);
     println!(
         "Skipped figure generation for {} iterations due to unsolved q/r/p1/p2",
-        skipped_figure_count
+        skipped_figure_count.load(Ordering::Relaxed)
     );
 
-    // Print summary statistics
-    print_summary_statistics(&results, &headers);
+    let csv_err = csv_error_count.load(Ordering::Relaxed);
+    if csv_err > 0 {
+        println!("Warning: {} iterations failed to write CSV rows.", csv_err);
+    }
+
+    let plot_err = plot_error_count.load(Ordering::Relaxed);
+    if plot_err > 0 {
+        println!(
+            "Warning: {} iterations failed to generate figures.",
+            plot_err
+        );
+    }
+
+    // Print summary statistics from running stats
+    if let Ok(s) = stats.lock() {
+        print_summary_statistics(&s, &headers, total_iterations);
+    }
 
     println!("Results saved to {}", filename);
     println!("Total time: {:?}", start.elapsed());
@@ -226,7 +324,10 @@ fn parse_worker_count() -> usize {
             });
 
             let workers = value.parse::<usize>().unwrap_or_else(|_| {
-                eprintln!("Invalid worker count '{}'. Please provide a positive integer.", value);
+                eprintln!(
+                    "Invalid worker count '{}'. Please provide a positive integer.",
+                    value
+                );
                 std::process::exit(1);
             });
 
@@ -248,31 +349,27 @@ fn parse_worker_count() -> usize {
         default_workers
     );
     default_workers
-} 
+}
 
-fn print_summary_statistics(results: &[Vec<f64>], headers: &[&str]) {
-    if results.is_empty() {
+fn print_summary_statistics(stats: &[RunningStats], headers: &[&str], total_iterations: usize) {
+    if stats.is_empty() {
         return;
     }
 
     println!("\n=== Summary Statistics ===");
-    println!("Total iterations: {}", results.len());
+    println!("Total iterations: {}", total_iterations);
 
     for (i, &header) in headers.iter().enumerate() {
-        if i >= results[0].len() {
-            break;
+        if let Some(col) = stats.get(i) {
+            println!(
+                "{}: mean={:.6}, std={:.6}, min={:.6}, max={:.6}",
+                header,
+                col.mean,
+                col.std_dev(),
+                col.min,
+                col.max
+            );
         }
-
-        let values: Vec<f64> = results.iter().map(|row| row[i]).collect();
-        let mean = utils::mean(&values);
-        let std = utils::std_dev(&values);
-        let min_val = values.iter().cloned().fold(f64::INFINITY, f64::min);
-        let max_val = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-
-        println!(
-            "{}: mean={:.6}, std={:.6}, min={:.6}, max={:.6}",
-            header, mean, std, min_val, max_val
-        );
     }
     println!("========================\n");
 }
@@ -285,61 +382,34 @@ fn process_iteration(
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     // Generate samples
     let cf = distribution::operation_cost_gamma(100, e_cf, var_cf, Some(0));
-    let dpv = distribution::sample_multivariate_lognormal(100, mean, cov, Some(0));
+    let (d_samples, p_samples, v_samples) =
+        distribution::sample_multivariate_lognormal(100, mean, cov, Some(0));
 
     // Calculate statistics
-    let mean_d = utils::mean(&dpv.0);
-    let mean_p = utils::mean(&dpv.1);
-    let mean_v = utils::mean(&dpv.2);
-    let mean_dp = utils::mean(&utils::elementwise_mul(&dpv.0, &dpv.1));
-    let mean_pv = utils::mean(&utils::elementwise_mul(&dpv.1, &dpv.2));
+    let mean_d = utils::mean(&d_samples);
+    let mean_p = utils::mean(&p_samples);
+    let mean_v = utils::mean(&v_samples);
+    let mean_dp = utils::mean(&utils::elementwise_mul(&d_samples, &p_samples));
+    let mean_pv = utils::mean(&utils::elementwise_mul(&p_samples, &v_samples));
 
-    let s_d = utils::std_dev(&dpv.0);
-    let s_p = utils::std_dev(&dpv.1);
-    let s_v = utils::std_dev(&dpv.2);
-    let s_dp = utils::std_dev(&utils::elementwise_mul(&dpv.0, &dpv.1));
-    let s_pv = utils::std_dev(&utils::elementwise_mul(&dpv.1, &dpv.2));
+    let s_d = utils::std_dev(&d_samples);
+    let s_p = utils::std_dev(&p_samples);
+    let s_v = utils::std_dev(&v_samples);
+    let s_dp = utils::std_dev(&utils::elementwise_mul(&d_samples, &p_samples));
+    let s_pv = utils::std_dev(&utils::elementwise_mul(&p_samples, &v_samples));
 
     let mean_cf = utils::mean(&cf);
     let s_cf = utils::std_dev(&cf);
 
     // Run game simulation
     let (m11, m12, m21, m22, q, r, p1, p2, fun) = game::start_game(
-        100, mean_d, mean_p, mean_v, mean_dp, mean_pv, mean_cf, s_cf, s_d, s_p, s_v, s_dp, s_pv,
+        20, mean_d, mean_p, mean_v, mean_dp, mean_pv, mean_cf, s_cf, s_d, s_p, s_v, s_dp, s_pv,
     );
 
-    // Collect results
     let result_data = vec![
         mean_d, mean_p, mean_v, mean_dp, mean_pv, mean_cf, s_d, s_p, s_v, s_dp, s_pv, s_cf, m11,
         m12, m21, m22, q, r, p1, p2, fun,
     ];
 
-    // Return result data with per-iteration samples for plotting
-    (result_data, dpv.1.clone(), cf)
+    (result_data, p_samples, cf)
 }
-
-fn write_results(
-    results: &[Vec<f64>],
-    headers: &[&str],
-    filename: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use std::path::Path;
-
-    let file_exists = Path::new(filename).exists();
-    let mut wtr = Writer::from_path(filename)?;
-
-    // Write headers only if file doesn't exist
-    if !file_exists {
-        wtr.write_record(headers)?;
-    }
-
-    // Write data
-    for row in results {
-        let row_str: Vec<String> = row.iter().map(|v| format!("{}", v)).collect();
-        wtr.write_record(&row_str)?;
-    }
-
-    wtr.flush()?;
-    Ok(())
-}
-
