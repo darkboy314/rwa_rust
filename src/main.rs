@@ -92,7 +92,7 @@ fn main() {
 
     // Create CSV headers
     let headers = vec![
-        "E_D", "E_P", "E_V", "E_DP", "E_PV", "E_cf", "sigma_D", "sigma_P", "sigma_V", "sigma_DP",
+        "T", "c_t", "k", "f", "E_D", "E_P", "E_V", "E_DP", "E_PV", "E_cf", "sigma_D", "sigma_P", "sigma_V", "sigma_DP",
         "sigma_PV", "sigma_cf", "m11", "m12", "m21", "m22", "q", "r", "p1", "p2", "fun",
     ];
 
@@ -258,10 +258,10 @@ fn main() {
         }
 
         // Plot immediately
-        let q = result_data[16];
-        let r = result_data[17];
-        let p1 = result_data[18];
-        let p2 = result_data[19];
+        let q = result_data[20];
+        let r = result_data[21];
+        let p1 = result_data[22];
+        let p2 = result_data[23];
 
         if !(q.is_finite() && r.is_finite() && p1.is_finite() && p2.is_finite()) {
             worker_skipped.fetch_add(1, Ordering::Relaxed);
@@ -432,8 +432,8 @@ fn process_iteration(
     );
 
     let result_data = vec![
-        mean_d, mean_p, mean_v, mean_dp, mean_pv, mean_cf, s_d, s_p, s_v, s_dp, s_pv, s_cf, m11,
-        m12, m21, m22, q, r, p1, p2, fun,
+        game::T, game::C_T, game::K, game::F, mean_d, mean_p, mean_v, mean_dp, mean_pv, mean_cf,
+        s_d, s_p, s_v, s_dp, s_pv, s_cf, m11, m12, m21, m22, q, r, p1, p2, fun,
     ];
 
     (result_data, p_samples, cf)

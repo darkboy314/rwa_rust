@@ -6,12 +6,12 @@ use argmin::core::{CostFunction, Error, Executor};
 use argmin::solver::brent::BrentOpt;
 use std::sync::{Arc, Mutex};
 
-const T: f64 = 10.0; // Lifespan years
+pub const T: f64 = 10.0; // Lifespan years
+pub const C_T: f64 = 100.0; // Transaction cost ($)
+pub const K: f64 = 580000.0; // Development cost per unit ($/MWh)
+pub const F: f64 = 1700.0; // Sales price per unit ($/MWh)
 const Q: f64 = 200.0; // Storage capacity (MWh)
 const R: f64 = 0.2; // Profit sharing ratio
-const C_T: f64 = 100.0; // Transaction cost ($)
-const K: f64 = 580000.0; // Development cost per unit ($/MWh) 
-const F: f64 = 1700.0; // Sales price per unit ($/MWh)
 
 pub struct ResultStruct {
     pub f: f64,
@@ -160,14 +160,6 @@ impl UpstreamPlayer {
     pub fn cons_3(&self, q: f64, p2: f64, m2: f64) -> f64 {
         F * q - p2 * m2
     }
-
-    pub fn cons_4(&self, r: f64) -> f64 {
-        1.0 - r
-    }
-
-    pub fn cons_5(&self, q: f64, p2: f64, m2: f64, e_cf: f64) -> f64 {
-        p2 * m2 - T * e_cf * q
-    }
 }
 
 struct OneDCost<F>(F);
@@ -258,12 +250,11 @@ pub fn penalty_function(
     let m1 = result.reg1_m + result.reg2_m;
     let m2 = result.oft1_m + result.oft2_m;
 
-    -1e100
-        * (up.cons_1(q, p1, m1).min(0.0)
-            + up.cons_2(q, r, p2, m2, params.e_cf).min(0.0)
-            + up.cons_3(q, p2, m2).min(0.0)
-            + up.cons_4(r).min(0.0)
-            + up.cons_5(q, p2, m2, params.e_cf).min(0.0))
+    let a = up.cons_1(q, p1, m1).min(0.0);
+    let b = up.cons_2(q, r, p2, m2, params.e_cf).min(0.0);
+    let c = up.cons_3(q, p2, m2).min(0.0);
+
+    -1e100 * (a + b + c)
 }
 
 /// Run the multi-stage game simulation
@@ -304,13 +295,13 @@ pub fn start_game(
     let oft2 = StageTwoPlayer::new(500.0, 1e10, 0.7);
 
     // initialize upper player
-    let ga = crate::ga::GA::new(500, 40, 0.2);
+    let ga = crate::ga::GA::new(600, 500, 0.2);
 
     let p_range = [
         (0.0, 10000.0),
         (0.0, 1.0),
-        (0.0, 10000000.0),
-        (0.0, 10000000.0),
+        (0.0, 10000.0),
+        (0.0, 10000.0),
     ];
     let m_range = [(-50.0, 50.0), (-0.5, 0.5), (-500.0, 500.0), (-500.0, 500.0)];
 
@@ -376,7 +367,7 @@ pub fn start_game(
 
     let (x, ga_result) = ga.run(obj_func, Some(penalty_func), &p_range, &m_range);
 
-    let final_result = if x.iter().all(|v| v.is_finite()) {
+    let final_result = (|| {
         let mut reg1_final = StageOnePlayer::new(reg1.m, reg1.b, reg1.lbd);
         let mut reg2_final = StageOnePlayer::new(reg2.m, reg2.b, reg2.lbd);
         let mut oft1_final = StageTwoPlayer::new(oft1.m, oft1.b, oft1.gma);
@@ -394,15 +385,7 @@ pub fn start_game(
             &mut oft1_final,
             &mut oft2_final,
         )
-    } else {
-        ResultStruct {
-            f: ga_result,
-            reg1_m: f64::NAN,
-            reg2_m: f64::NAN,
-            oft1_m: f64::NAN,
-            oft2_m: f64::NAN,
-        }
-    };
+    })();
 
     (
         final_result.reg1_m,
