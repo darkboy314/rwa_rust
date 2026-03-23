@@ -92,8 +92,10 @@ fn main() {
 
     // Create CSV headers
     let headers = vec![
-        "T", "c_t", "k", "f", "E_D", "E_P", "E_V", "E_DP", "E_PV", "E_cf", "sigma_D", "sigma_P", "sigma_V", "sigma_DP",
-        "sigma_PV", "sigma_cf", "m11", "m12", "m21", "m22", "q", "r", "p1", "p2", "fun",
+        "T", "c_t", "k", "f", "E_D", "E_P", "E_V", "E_DP", "E_PV", "E_cf", "sigma_D", "sigma_P",
+        "sigma_V", "sigma_DP", "sigma_PV", "sigma_cf", "m11", "lambda1", "theta1", "m12",
+        "lambda2", "theta2", "m21", "gamma1", "mu1", "m22", "gamma2", "mu2", "q", "r", "p1", "p2",
+        "fun",
     ];
 
     // Market parameters
@@ -258,10 +260,10 @@ fn main() {
         }
 
         // Plot immediately
-        let q = result_data[20];
-        let r = result_data[21];
-        let p1 = result_data[22];
-        let p2 = result_data[23];
+        let q = result_data[28];
+        let r = result_data[29];
+        let p1 = result_data[30];
+        let p2 = result_data[31];
 
         if !(q.is_finite() && r.is_finite() && p1.is_finite() && p2.is_finite()) {
             worker_skipped.fetch_add(1, Ordering::Relaxed);
@@ -427,13 +429,62 @@ fn process_iteration(
     let s_cf = utils::std_dev(&cf);
 
     // Run game simulation
-    let (m11, m12, m21, m22, q, r, p1, p2, fun) = game::start_game(
+    let (
+        m11,
+        lambda1,
+        theta1,
+        m12,
+        lambda2,
+        theta2,
+        m21,
+        gamma1,
+        mu1,
+        m22,
+        gamma2,
+        mu2,
+        q,
+        r,
+        p1,
+        p2,
+        fun,
+    ) = game::start_game(
         20, mean_d, mean_p, mean_v, mean_dp, mean_pv, mean_cf, s_cf, s_d, s_p, s_v, s_dp, s_pv,
     );
 
     let result_data = vec![
-        game::T, game::C_T, game::K, game::F, mean_d, mean_p, mean_v, mean_dp, mean_pv, mean_cf,
-        s_d, s_p, s_v, s_dp, s_pv, s_cf, m11, m12, m21, m22, q, r, p1, p2, fun,
+        game::T,
+        game::C_T,
+        game::K,
+        game::F,
+        mean_d,
+        mean_p,
+        mean_v,
+        mean_dp,
+        mean_pv,
+        mean_cf,
+        s_d,
+        s_p,
+        s_v,
+        s_dp,
+        s_pv,
+        s_cf,
+        m11,
+        lambda1,
+        theta1,
+        m12,
+        lambda2,
+        theta2,
+        m21,
+        gamma1,
+        mu1,
+        m22,
+        gamma2,
+        mu2,
+        q,
+        r,
+        p1,
+        p2,
+        fun,
     ];
 
     (result_data, p_samples, cf)

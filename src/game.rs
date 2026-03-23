@@ -272,7 +272,25 @@ pub fn start_game(
     sigma_v: f64,
     sigma_dp: f64,
     sigma_pv: f64,
-) -> (f64, f64, f64, f64, f64, f64, f64, f64, f64) {
+) -> (
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+) {
     let params = GameParams {
         e_d,
         e_p,
@@ -297,12 +315,7 @@ pub fn start_game(
     // initialize upper player
     let ga = crate::ga::GA::new(600, 500, 0.2);
 
-    let p_range = [
-        (0.0, 10000.0),
-        (0.0, 1.0),
-        (0.0, 10000.0),
-        (0.0, 10000.0),
-    ];
+    let p_range = [(0.0, 10000.0), (0.0, 1.0), (0.0, 10000.0), (0.0, 10000.0)];
     let m_range = [(-50.0, 50.0), (-0.5, 0.5), (-500.0, 500.0), (-500.0, 500.0)];
 
     let result_state = Arc::new(Mutex::new(ResultStruct {
@@ -387,11 +400,49 @@ pub fn start_game(
         )
     })();
 
+    let up_final = UpstreamPlayer::new(x[0], x[1], x[2], x[3], 2, 2);
+    let m2_final = final_result.oft1_m + final_result.oft2_m;
+
+    let theta1 = reg1.theta(
+        final_result.reg1_m,
+        &up_final,
+        &params,
+        m2_final,
+        &[final_result.reg1_m, final_result.reg2_m],
+    );
+    let theta2 = reg2.theta(
+        final_result.reg2_m,
+        &up_final,
+        &params,
+        m2_final,
+        &[final_result.reg2_m, final_result.reg1_m],
+    );
+    let mu1 = oft1.mu(
+        final_result.oft1_m,
+        &up_final,
+        &params,
+        &[final_result.oft1_m, final_result.oft2_m],
+    );
+    let mu2 = oft2.mu(
+        final_result.oft2_m,
+        &up_final,
+        &params,
+        &[final_result.oft2_m, final_result.oft1_m],
+    );
+
     (
         final_result.reg1_m,
+        reg1.lbd,
+        theta1,
         final_result.reg2_m,
+        reg2.lbd,
+        theta2,
         final_result.oft1_m,
+        oft1.gma,
+        mu1,
         final_result.oft2_m,
+        oft2.gma,
+        mu2,
         x[0],
         x[1],
         x[2],
