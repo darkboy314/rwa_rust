@@ -1,4 +1,5 @@
 use rand::{Rng, RngExt};
+use rayon::prelude::*;
 use std::cmp::Ordering;
 
 /// Genetic Algorithm implementation
@@ -26,8 +27,8 @@ impl GA {
         m_range: &[(f64, f64)],
     ) -> (Vec<f64>, f64)
     where
-        F: Fn(&[f64]) -> f64,
-        P: Fn(&[f64]) -> f64,
+        F: Fn(&[f64]) -> f64 + Sync + Send,
+        P: Fn(&[f64]) -> f64 + Sync + Send,
     {
         let mut rng = rand::rng();
 
@@ -43,7 +44,7 @@ impl GA {
             population.extend(offspring);
 
             let mut scored_population: Vec<(Vec<f64>, f64)> = population
-                .into_iter()
+                .into_par_iter()
                 .map(|individual| {
                     let penalty = self.penalty_function(&individual, p_range);
                     let obj = obj_func(&individual);
@@ -72,21 +73,21 @@ impl GA {
 
         // Check if penalty function is violated (constraint check)
         // Using a small epsilon for numerical stability
-        let epsilon_constraint: f64 = 1e-6;
-        if let Some(p_func) = penalty_func {
-            if p_func(&best) > epsilon_constraint {
-                let nan_vec = vec![f64::NAN; best.len()];
-                return (nan_vec, f64::NAN);
-            }
-        }
+        // let epsilon_constraint: f64 = 1e-6;
+        // if let Some(p_func) = penalty_func {
+        //     if p_func(&best) > epsilon_constraint {
+        //         let nan_vec = vec![f64::NAN; best.len()];
+        //         return (nan_vec, f64::NAN);
+        //     }
+        // }
 
         // Check if bounds are violated (boundary check)
-        let epsilon_bound: f64 = 1e-6;
-        let bound_penalty = self.penalty_function(&best, p_range);
-        if bound_penalty > epsilon_bound {
-            let nan_vec = vec![f64::NAN; best.len()];
-            return (nan_vec, f64::NAN);
-        }
+        // let epsilon_bound: f64 = 1e-6;
+        // let bound_penalty = self.penalty_function(&best, p_range);
+        // if bound_penalty > epsilon_bound {
+        //     let nan_vec = vec![f64::NAN; best.len()];
+        //     return (nan_vec, f64::NAN);
+        // }
 
         let best_fitness = obj_func(&best);
         (best, best_fitness)

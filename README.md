@@ -1,80 +1,112 @@
-# RWA - Rust Rewrite
+# RWA Rust 项目说明
 
-This is a Rust rewrite of the original Python project for Renewable Energy Wholesaler Arbitrage (RWA) simulation.
+该项目用于模拟 RWA（Renewable Energy Wholesaler Arbitrage）三阶段博弈，并通过并行 Monte Carlo 迭代输出结果与分布图。
 
-## Project Structure
+## 当前实现状态
 
-- `src/main.rs`: Main entry point with async simulation logic
-- `src/game.rs`: Game theory models for players (upstream, stage one, stage two)
-- `src/ga.rs`: Genetic algorithm implementation for optimization
-- `src/utils.rs`: Utility functions for statistical sampling and optimization
+- 并行执行：基于 Rayon 线程池
+- 统计采样：Gamma + 多元对数正态采样
+- 博弈求解：上下游玩家 + 最优响应迭代 + GA 外层优化
+- 输出方式：按迭代实时写入 CSV（时间戳目录 + 全局汇总）
+- 绘图：每次迭代保存价格和成本分布图
 
-## Key Components
+## 项目结构
 
-### Game Theory Models
-- **UpstreamPlayer**: Represents the energy storage provider
-- **StageOneGame**: Renewable energy generators
-- **StageTwoGame**: Electricity offtakers
-
-### Optimization
-- Genetic Algorithm for parameter optimization
-- Constraint-based best response functions
-- Statistical sampling (Gamma, Lognormal distributions)
-
-### Simulation
-- Multi-threaded Monte Carlo simulations
-- CSV output for results
-- Directory structure for organized outputs
-
-## Dependencies
-
-- `rand` & `rand_distr`: Random number generation
-- `nalgebra`: Linear algebra operations
-- `argmin`: Optimization framework
-- `tokio`: Async runtime
-- `chrono`: Date/time handling
-- `csv`: CSV file handling
-- `serde`: Serialization
-
-## Building and Running
-
-```bash
-cargo build --release
-cargo run
+```text
+src/
+	main.rs          # 程序入口、并行调度、CSV 写入、进度显示、统计汇总
+	game.rs          # 三阶段博弈与约束、GA 目标/惩罚函数
+	distribution.rs  # Gamma 与多元对数正态采样
+	plotting.rs      # figure-1 / figure-2 绘图输出
+	ga.rs            # 遗传算法
+	utils.rs         # 统计与向量工具
 ```
 
-## Differences from Python Version
+## 运行方式
 
-1. **Performance**: Rust provides better performance and memory safety
-2. **Concurrency**: Uses async/await for parallel simulations
-3. **Type Safety**: Compile-time guarantees prevent runtime errors
-4. **Simplified Sampling**: Current implementation uses independent sampling; full multivariate lognormal to be implemented
+### 1) 检查编译
 
-## TODO
+```bash
+cargo check
+```
 
-- Implement full multivariate lognormal sampling
-- Complete the genetic algorithm integration
-- Add CSV output functionality
-- Implement plotting with plotters crate
-- Add comprehensive error handling
+### 2) 运行（默认线程数 = 逻辑核数）
 
-## Original Python Features
+```bash
+cargo run --release
+```
 
-The original Python project included:
-- Complex game theory simulations
-- Genetic algorithm optimization
-- Statistical analysis and visualization
-- Multi-threaded execution
+### 3) 指定线程数运行
 
-This Rust version aims to replicate and improve upon these features while leveraging Rust's strengths in performance and safety.
+```bash
+cargo run --release -- --workers 4
+```
 
----
+说明：程序当前固定执行 100 次迭代（`main.rs` 内 `total_iterations = 100`）。
 
-Original README:
+## 输出目录
 
-A project for simulating multi-player in RWA market
+每次运行会创建：
 
-测试结果：
-1. 价格和需求波动大时，投资者倾向于减少投资
-2. 在价格/需求波动小时，双方投资者都会投资，但是上层指定的r（分红）比例很高，同时p2也会接近于f（市场销售单价） ***
-3. 
+- `output/YYYY-MM-DD HH-MM-SS/result.csv`
+- `output/YYYY-MM-DD HH-MM-SS/figure-1/*.png`
+- `output/YYYY-MM-DD HH-MM-SS/figure-2/*.png`
+
+同时会更新全局汇总文件：
+
+- `output/result.csv`
+
+## CSV 列定义（当前 36 列）
+
+列顺序如下：
+
+1. `T`
+2. `c_t`
+3. `k`
+4. `f`
+5. `E_D`
+6. `E_P`
+7. `E_V`
+8. `E_DP`
+9. `E_PV`
+10. `E_cf`
+11. `sigma_D`
+12. `sigma_P`
+13. `sigma_V`
+14. `sigma_DP`
+15. `sigma_PV`
+16. `sigma_cf`
+17. `m11`
+18. `lambda1`
+19. `theta1`
+20. `m12`
+21. `lambda2`
+22. `theta2`
+23. `m21`
+24. `gamma1`
+25. `mu1`
+26. `m22`
+27. `gamma2`
+28. `mu2`
+29. `q`
+30. `r`
+31. `p1`
+32. `p2`
+33. `cons_1`
+34. `cons_2`
+35. `cons_3`
+36. `pi`
+
+其中 `cons_1/cons_2/cons_3` 为 `UpstreamPlayer` 的三个约束函数值，位置已插入在 `p2` 与 `pi` 之间。
+
+## 依赖（按当前 Cargo.toml）
+
+- `argmin`
+- `chrono`
+- `csv`
+- `mimalloc`
+- `plotters`
+- `rand`
+- `rand_chacha`
+- `rand_distr`
+- `rayon`

@@ -95,7 +95,7 @@ fn main() {
         "T", "c_t", "k", "f", "E_D", "E_P", "E_V", "E_DP", "E_PV", "E_cf", "sigma_D", "sigma_P",
         "sigma_V", "sigma_DP", "sigma_PV", "sigma_cf", "m11", "lambda1", "theta1", "m12",
         "lambda2", "theta2", "m21", "gamma1", "mu1", "m22", "gamma2", "mu2", "q", "r", "p1", "p2",
-        "fun",
+        "cons_1", "cons_2", "cons_3", "pi",
     ];
 
     // Market parameters
@@ -115,7 +115,7 @@ fn main() {
     let rho_pv = 0.3;
     let rho_dv = 0.2;
 
-    let e_cf = 50.0;
+    let e_cf = 5.0;
     let var_cf = 10.0;
 
     // Build covariance matrix
@@ -408,9 +408,9 @@ fn process_iteration(
     cov: &[Vec<f64>],
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     // Generate samples
-    let cf = distribution::operation_cost_gamma(100, e_cf, var_cf, None);
+    let cf = distribution::operation_cost_gamma(100, e_cf, var_cf, Some(0));
     let (d_samples, p_samples, v_samples) =
-        distribution::sample_multivariate_lognormal(100, mean, cov, None);
+        distribution::sample_multivariate_lognormal(100, mean, cov, Some(0));
 
     // Calculate statistics
     let mean_d = utils::mean(&d_samples);
@@ -429,29 +429,11 @@ fn process_iteration(
     let s_cf = utils::std_dev(&cf);
 
     // Run game simulation
-    let (
-        m11,
-        lambda1,
-        theta1,
-        m12,
-        lambda2,
-        theta2,
-        m21,
-        gamma1,
-        mu1,
-        m22,
-        gamma2,
-        mu2,
-        q,
-        r,
-        p1,
-        p2,
-        fun,
-    ) = game::start_game(
+    let res = game::start_game(
         20, mean_d, mean_p, mean_v, mean_dp, mean_pv, mean_cf, s_cf, s_d, s_p, s_v, s_dp, s_pv,
     );
 
-    let result_data = vec![
+    let args = [
         game::T,
         game::C_T,
         game::K,
@@ -468,24 +450,9 @@ fn process_iteration(
         s_dp,
         s_pv,
         s_cf,
-        m11,
-        lambda1,
-        theta1,
-        m12,
-        lambda2,
-        theta2,
-        m21,
-        gamma1,
-        mu1,
-        m22,
-        gamma2,
-        mu2,
-        q,
-        r,
-        p1,
-        p2,
-        fun,
     ];
+
+    let result_data = [&args[..], &res[..]].concat();
 
     (result_data, p_samples, cf)
 }

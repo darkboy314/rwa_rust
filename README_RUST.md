@@ -1,199 +1,98 @@
-# RWA - Renewable Energy Wholesaler Arbitrage Simulation (Rust Edition)
+# RWA - Renewable Energy Wholesaler Arbitrage Simulation (Rust)
 
-This is a high-performance Rust rewrite of the original Python project for simulating multi-player market dynamics in the Renewable Energy Wholesaler Arbitrage (RWA) market.
+Rust 版本的 RWA 三阶段博弈仿真程序。当前实现以并行 Monte Carlo 为主流程，在每次迭代中完成采样、博弈求解、CSV 落盘和图像输出。
 
 ## Overview
 
-This project implements a three-stage game-theoretic simulation for renewable energy market arbitrage:
-- **Stage 1 (Upstream)**: Energy storage provider optimization
-- **Stage 2 (Middle)**: Renewable energy generator competition  
-- **Stage 3 (Downstream)**: Electricity offtaker cost minimization
+三层参与者：
 
-## Project Structure
+- 上游（Upstream）：储能提供方，优化 `q/r/p1/p2`
+- 中层（Stage One）：可再生能源发电方
+- 下游（Stage Two）：购电方
 
-```
+核心流程：
+
+1. 采样需求、价格、价值、运行成本
+2. 运行多阶段博弈与 GA
+3. 生成一行结果并立即写入 CSV
+4. 按迭代输出两张分布图
+
+## Current Project Structure
+
+```text
 src/
-├── main.rs          # Main entry point with parallel Monte Carlo simulation
-├── distribution.rs  # Statistical distributions (Gamma, Multivariate Lognormal)
-├── game.rs          # Game theory models for all three stages
-├── ga.rs            # Genetic algorithm for parameter optimization
-└── utils.rs         # Utility functions for statistical calculations
+	main.rs          # 入口，线程配置，进度显示，CSV 写入，汇总统计
+	distribution.rs  # Gamma 与多元对数正态采样
+	game.rs          # 玩家建模、约束函数、最优响应与外层 GA
+	ga.rs            # 遗传算法实现
+	plotting.rs      # 每次迭代输出 figure-1/figure-2
+	utils.rs         # 均值、标准差、向量工具
 ```
 
-## Key Features
-
-### 1. **High-Performance Computing**
-- **Parallel Execution**: Uses Rayon for parallel Monte Carlo simulations across 10,000+ iterations
-- **Performance**: ~30ms for 10,000 simulations (vs minutes in Python)
-- **Memory Safety**: Rust's compile-time guarantees prevent runtime errors
-
-### 2. **Statistical Sampling**
-- **Gamma Distribution**: For operating cost generation with shape/scale parameters
-- **Multivariate Lognormal**: Bivariate/trivariate lognormal distribution for correlated variables
-- **Cholesky Decomposition**: For accurate covariance matrix handling
-
-### 3. **Game Theory Engine**
-- **Stage One Players**: Competitive renewable energy generators
-- **Stage Two Players**: Cost-minimizing electricity offtakers
-- **Upstream Player**: Energy storage provider maximizing profit
-- **Constraint Management**: Budget constraints and feasibility checks
-
-### 4. **Genetic Algorithm Optimization**
-- **Population-based Search**: 500 individuals over 500 generations
-- **Custom Fitness Function**: Penalty functions for constraint violations
-- **Crossover & Mutation**: Standard GA operators for exploration
-
-### 5. **Data Export**
-- **CSV Output**: Structured results with 21 columns
-- **Timestamped Directories**: Organized output structure for multiple runs
-- **Statistical Tracking**: Performance metrics and convergence data
-
-## Building and Running
+## Build and Run
 
 ### Prerequisites
-- Rust 1.70+
+
+- Rust toolchain（建议 stable）
 - Cargo
 
 ### Build
-```bash
-# Debug build
-cargo build
 
-# Release build (optimized)
+```bash
 cargo build --release
 ```
 
 ### Run
+
 ```bash
-# Execute simulation
+# 默认线程数 = 逻辑 CPU 核数
 cargo run --release
 
-# Output location
-./output/YYYY-MM-DD HH-MM-SS/result.csv
+# 指定线程数
+cargo run --release -- --workers 4
 ```
 
-## Output Format
+说明：当前迭代次数固定为 100。
 
-The CSV output includes statistical parameters, player investment levels, optimization results, and objective function values.
+## Output
 
-Example columns:
-- E_D, E_P, E_V: Expected demand, price, value
-- E_DP, E_PV: Expected covariances
-- sigma_D through sigma_pv: Standard deviations of distributions
-- m11, m12, m21, m22: Player investment levels
-- q, r, p1, p2: Optimization parameters
-- fun: Objective function value
+每次运行会生成：
 
-## Implementation Details
+- `output/YYYY-MM-DD HH-MM-SS/result.csv`
+- `output/YYYY-MM-DD HH-MM-SS/figure-1/*.png`
+- `output/YYYY-MM-DD HH-MM-SS/figure-2/*.png`
 
-### Distribution Module (`distribution.rs`)
-- `operation_cost_gamma()`: Samples from Gamma distribution using shape/scale parameterization
-- `sample_multivariate_lognormal()`: Generates 3D correlated lognormal samples
-- `lognormal_params_from_mean_var()`: Converts mean/variance to μ/σ parameters
-- `cholesky_decomposition()`: 3x3 matrix factorization for correlation handling
+并同步写入：
 
-### Game Module (`game.rs`)
-- `StageOnePlayer`: Implements renewable energy generator profit maximization
-- `StageTwoPlayer`: Models electricity offtaker cost minimization
-- `UpstreamPlayer`: Energy storage provider objective function
-- `start_game()`: Orchestrates multi-stage equilibrium computation
+- `output/result.csv`
 
-### GA Module (`ga.rs`)
-- Population initialization with uniform random sampling
-- Fitness evaluation with penalty functions
-- Crossover: Uniform blending between parent solutions
-- Mutation: Random perturbations within specified ranges
-- Selection: Elite filtering based on fitness scores
+程序会在终端打印多线程进度，并在结束时输出各列的均值、标准差、最小值、最大值。
 
-### Utils Module (`utils.rs`)
-- Statistical calculations (mean, standard deviation)
-- Element-wise vector operations
-- Numerical stability utilities
+## CSV Schema (36 columns)
 
-## Performance Comparison
+完整列顺序：
 
-| Metric | Python | Rust | Improvement |
-|--------|--------|------|-------------|
-| 10,000 iterations | ~600 seconds | ~0.03 seconds | **20,000x faster** |
-| Memory usage | 500-1000 MB | <50 MB | **10-20x less** |
-| CPU efficiency | ~50 threads | Rayon optimized | ~100% utilization |
+`T, c_t, k, f, E_D, E_P, E_V, E_DP, E_PV, E_cf, sigma_D, sigma_P, sigma_V, sigma_DP, sigma_PV, sigma_cf, m11, lambda1, theta1, m12, lambda2, theta2, m21, gamma1, mu1, m22, gamma2, mu2, q, r, p1, p2, cons_1, cons_2, cons_3, pi`
 
-## Test Results from Original Analysis
+其中：
 
-Market behavior insights from extensive simulation:
+- `cons_1`, `cons_2`, `cons_3` 为 `UpstreamPlayer` 三个约束函数值
+- 这三列位于 `p2` 和 `pi` 之间
 
-1. **High Volatility Regime**: When price and demand volatility are high, investors tend to reduce investment
-2. **Low Volatility Regime**: With low volatility, both investors increase investment; dividend ratio (r) increases significantly
-3. **Market Equilibrium**: Dynamic pricing naturally emerges from strategic interaction
+## Dependencies (Current)
 
-## Dependencies
-
-- `rand` & `rand_distr`: Probability distributions and sampling
-- `rand_chacha`: Cryptographically-secure PRNG for reproducibility
-- `rayon`: Data parallelism for Monte Carlo
-- `csv`: CSV file I/O
-- `chrono`: Timestamp generation
-- `serde`: Serialization framework (for future extensions)
-- `tokio`: Async runtime (for future enhancements)
-
-## Differences from Python Version
-
-| Aspect | Python | Rust |
-|--------|--------|------|
-| Performance | Baseline | 20,000x faster |
-| Memory Safety | Runtime errors | Compile-time checks |
-| Parallelization | ThreadPoolExecutor | Rayon data parallelism |
-| Type Safety | Dynamic | Static typing |
-| Reproducibility | Seed-based | Deterministic CSPRNG |
-| Data Output | Pandas | CSV native |
-
-## Future Enhancements
-
-- [ ] Full n-dimensional multivariate normal sampling
-- [ ] Constrained optimization with gradient-based methods  
-- [ ] Advanced GA features (adaptive mutation, elitism scheduling)
-- [ ] Result visualization with plotters crate
-- [ ] Database export (SQLite/PostgreSQL)
-- [ ] WebAssembly compilation for browser analysis
-- [ ] Linear algebra optimization with nalgebra
-
-## Project Status
-
-✅ Core simulation engine implemented
-✅ Statistical distributions complete
-✅ Game theory models functional
-✅ Genetic algorithm framework ready
-✅ CSV output working
-✅ Parallel execution verified
-🚀 Performance targets exceeded
+- `argmin`
+- `chrono`
+- `csv`
+- `mimalloc`
+- `plotters`
+- `rand`
+- `rand_chacha`
+- `rand_distr`
+- `rayon`
 
 ## Notes
 
-- All calculations use `f64` for double-precision accuracy
-- Seed-based RNG ensures reproducibility (`ChaCha8Rng`)
-- Parallel processing automatically scales to available CPU cores
-- Memory-efficient streaming CSV output
-- No external computation dependencies (pure Rust)
-
-## Building for Production
-
-```bash
-# Optimized release build
-cargo build --release
-
-# With additional optimizations (Cargo.toml)
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
-```
-
-## License
-
-This Rust implementation maintains full compatibility with the original Python project.
-
----
-
-**Original Python Project**: Multi-player market simulation for RWA  
-**Rust Version**: High-performance, memory-safe implementation (2026)  
-**Performance Gain**: 20,000x faster execution with 90% less memory
+- 使用 `f64` 进行计算
+- CSV 采用流式写入，减少中间结果堆积
+- 绘图失败与 CSV 写入失败会统计并在结束时给出 warning

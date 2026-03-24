@@ -1,299 +1,154 @@
-# RWA Rust Implementation - Building and Running Guide
+# RWA Rust - Building and Running Guide
 
 ## System Requirements
 
-- **Rust Version**: 1.70 or later
-- **OS**: Windows, macOS, or Linux
-- **RAM**: 2GB minimum (4GB+ recommended)
-- **Disk**: 500MB for Rust toolchain + project
+- Rust stable toolchain
+- Cargo
+- Windows / macOS / Linux
 
-## Installation
+## Install Rust
 
-### 1. Install Rust
+Linux/macOS:
 
-**Linux/macOS:**
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-**Windows:**
-- Download from https://rustup.rs/
-- Run installer and follow prompts
-- Requires Visual Studio Build Tools or complete Visual Studio
+Windows:
 
-### 2. Verify Installation
+1. Download installer from https://rustup.rs/
+2. Install with default options
+3. Ensure MSVC build tools are available
+
+Verify:
 
 ```bash
 rustc --version
 cargo --version
 ```
 
-## Building the Project
+## Build
 
-### Option 1: Quick Build (Linux/macOS)
+Debug build:
+
+```bash
+cargo build
+```
+
+Release build (recommended):
+
+```bash
+cargo build --release
+```
+
+## Run
+
+Run from source (recommended):
+
+```bash
+# Use logical CPU core count automatically
+cargo run --release
+
+# Specify worker threads
+cargo run --release -- --workers 4
+```
+
+Run compiled binary:
+
+Linux/macOS:
+
+```bash
+./target/release/rwa_rust
+```
+
+Windows PowerShell:
+
+```powershell
+.\target\release\rwa_rust.exe
+```
+
+Notes:
+
+- Current implementation runs `100` iterations per execution.
+- `--workers` (or `-w`) must be a positive integer.
+
+## Quick Scripts
+
+Linux/macOS:
+
 ```bash
 chmod +x run.sh
 ./run.sh
 ```
 
-### Option 2: Quick Build (Windows PowerShell)
+Windows PowerShell:
+
 ```powershell
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 .\run.ps1
 ```
 
-### Option 3: Manual Build
+## Output Files
 
-**Debug Build:**
-```bash
-cargo build
-```
-- Faster compilation
-- Slower execution
-- Good for development and testing
+Each run writes to a timestamped directory:
 
-**Release Build (Recommended):**
-```bash
-cargo build --release
-```
-- Slower compilation (~15 seconds)
-- 20,000x faster execution
-- Optimizations enabled
-
-### Option 4: Ultra-Optimized Build
-
-Edit `Cargo.toml`:
-```toml
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
-strip = true
-```
-
-Then build:
-```bash
-cargo build --release
-```
-
-## Running the Simulation
-
-### From Source
-```bash
-cargo run --release
-```
-
-### From Compiled Binary
-
-**Linux/macOS:**
-```bash
-./target/release/rwa
-```
-
-**Windows:**
-```powershell
-.\target\release\rwa.exe
-```
-
-## Output
-
-Results are saved to: `./output/YYYY-MM-DD HH-MM-SS/`
-
-Structure:
-```
+```text
 output/
-├── 2026-03-10 17-45-03/
-│   ├── result.csv          # Simulation results (10,000 rows)
-│   ├── figure-1/           # Reserved for visualizations
-│   └── figure-2/           # Reserved for visualizations
-└── ...
+  YYYY-MM-DD HH-MM-SS/
+    result.csv
+    figure-1/
+    figure-2/
 ```
 
-## Performance Expectations
+At the same time, a global merged CSV is also updated:
 
-| Build Type | Time | Notes |
-|-----------|------|-------|
-| Debug build execution | ~1-2 seconds | Not recommended for real use |
-| Release build execution | ~30-50ms | Optimal performance |
-| Build time (first) | ~15 seconds | Includes dependency compilation |
-| Build time (incremental) | ~1-2 seconds | After code changes |
-
-## Troubleshooting
-
-### Issue: "cargo: command not found"
-**Solution**: 
-- Add Rust to PATH: `~/.cargo/bin`
-- Restart terminal or run: `source $HOME/.cargo/env`
-
-### Issue: "linker `link.exe` not found"
-**Solution** (Windows):
-- Install Visual Studio Build Tools
-- Or install complete Visual Studio with C++ tools
-
-### Issue: Slow compilation
-**Solution**:
-- Ensure you have SSD (not HDD)
-- Run on modern CPU (2+ cores recommended)
-- Close other applications
-- Try clean build: `cargo clean && cargo build --release`
-
-### Issue: Out of memory during compilation
-**Solution**:
-- Close other applications
-- Limit parallel jobs: `cargo build -j 2`
-- Check available disk space (need 1GB+)
-
-### Issue: Results not generated
-**Solution**:
-- Check output directory permissions
-- Verify 10,000 iterations completed
-- Check for error messages in console output
-
-## Performance Optimization Tips
-
-1. **Use Release Build**: Always use `--release` for production
-2. **Hardware**: 
-   - Modern CPU (Intel i5+ or AMD Ryzen 5+)
-   - 8GB+ RAM
-   - SSD for compilation
-3. **System**: 
-   - Close resource-heavy applications
-   - Disable antivirus scanning temporary
-   - Ensure good CPU cooling
-
-## Configuration
-
-To modify simulation parameters, edit `src/main.rs`:
-
-```rust
-// Number of iterations
-let results: Vec<Vec<f64>> = (0..10000)
-
-// Market parameters  
-let e_d = 30.0;           // Expected demand
-let e_p = 1400.0;         // Expected price
-let e_v = 50.0;           // Expected value
+```text
+output/result.csv
 ```
 
-Then rebuild:
+## CSV Columns (Current)
+
+The current output has 36 columns:
+
+`T, c_t, k, f, E_D, E_P, E_V, E_DP, E_PV, E_cf, sigma_D, sigma_P, sigma_V, sigma_DP, sigma_PV, sigma_cf, m11, lambda1, theta1, m12, lambda2, theta2, m21, gamma1, mu1, m22, gamma2, mu2, q, r, p1, p2, cons_1, cons_2, cons_3, pi`
+
+`cons_1`, `cons_2`, `cons_3` are upstream constraints and are positioned between `p2` and `pi`.
+
+## Common Development Commands
+
 ```bash
-cargo build --release
-```
-
-## Development Workflow
-
-1. **Edit code** in `src/`
-2. **Check syntax**: `cargo check`
-3. **Run tests**: `cargo test`
-4. **Build**: `cargo build --release`
-5. **Profile**: `cargo flamegraph --release`
-6. **Bench**: `cargo bench`
-
-## Advanced Usage
-
-### Profiling
-```bash
-# Install flamegraph
-cargo install flamegraph
-
-# Run with profiling (Linux/macOS)
-cargo flamegraph --release
-```
-
-### Benchmarking
-```bash
-# Add benchmarks to Cargo.toml
-[[bench]]
-name = "simulation"
-harness = false
-
-# Run benchmarks
-cargo bench
-```
-
-### Continuous Integration
-```bash
-# Check compilation
+# Fast compile check
 cargo check
 
 # Run tests
 cargo test
 
-# Check formatting
+# Format check
 cargo fmt --check
 
-# Lint code
+# Lint
 cargo clippy
 ```
 
-## Cross-Compilation
+## Troubleshooting
 
-To compile for different targets:
+`cargo: command not found`:
 
-```bash
-# List installed targets
-rustup target list
+1. Reopen terminal after Rust install
+2. Ensure Cargo bin path is in PATH
 
-# Add new target
-rustup target add x86_64-pc-windows-gnu
+Windows linker error (`link.exe` not found):
 
-# Cross-compile
-cargo build --release --target x86_64-pc-windows-gnu
-```
+1. Install Visual Studio Build Tools (C++)
+2. Restart terminal and rebuild
 
-## Debugging
+No output files generated:
 
-### Print Debug Info
-```bash
-# Set Rust warnings
-RUST_BACKTRACE=1 cargo run --release
+1. Check write permission for `output/`
+2. Check console warnings for CSV/plot write failures
 
-# Full backtrace
-RUST_BACKTRACE=full cargo run --release
-```
+## Notes
 
-### Using a Debugger
-```bash
-# Install debugger
-# macOS: lldb (included with Xcode)
-# Linux: gdb (sudo apt install gdb)
-# Windows: Visual Studio Debugger
-
-# VS Code single-step debug entry (single-thread)
-cargo run -- --single-thread-debug
-
-# Run with debugger
-rust-gdb ./target/release/rwa
-```
-
-## Memory Analysis
-
-```bash
-# Check memory usage (Linux)
-time ./target/release/rwa
-
-# Monitor in real-time
-watch -n 1 "ps aux | grep rwa"
-```
-
-## CI/CD Integration
-
-GitHub Actions example:
-```yaml
-name: Build RWA
-on: [push]
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-      - run: cargo build --release
-      - run: cargo test
-```
-
----
-
-For more information, visit: https://www.rust-lang.org/
+- All core calculations use `f64`
+- CSV rows are streamed and flushed during execution
+- Plot generation failures are counted and reported at the end
