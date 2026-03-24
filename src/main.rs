@@ -411,13 +411,21 @@ fn process_iteration(
     let cf = distribution::operation_cost_gamma(100, e_cf, var_cf, Some(0));
     let (d_samples, p_samples, v_samples) =
         distribution::sample_multivariate_lognormal(100, mean, cov, Some(0));
+    let dp_samples = utils::elementwise_mul(&d_samples, &p_samples);
+    let pv_samples = utils::elementwise_mul(&p_samples, &v_samples);
 
     // Calculate statistics
     let mean_d = utils::mean(&d_samples);
     let mean_p = utils::mean(&p_samples);
     let mean_v = utils::mean(&v_samples);
-    let mean_dp = utils::mean(&utils::elementwise_mul(&d_samples, &p_samples));
-    let mean_pv = utils::mean(&utils::elementwise_mul(&p_samples, &v_samples));
+    let mean_dp = utils::mean(&dp_samples);
+    let mean_pv = utils::mean(&pv_samples);
+
+    let mean_p2 = utils::mean(&utils::elementwise_mul(&p_samples, &p_samples));
+    let mean_v2 = utils::mean(&utils::elementwise_mul(&v_samples, &v_samples));
+    let mean_p2v = utils::mean(&utils::elementwise_mul(&pv_samples, &p_samples));
+    let mean_pv2 = utils::mean(&utils::elementwise_mul(&pv_samples, &v_samples));
+    let mean_p2v2 = utils::mean(&utils::elementwise_mul(&pv_samples, &pv_samples));
 
     let s_d = utils::std_dev(&d_samples);
     let s_p = utils::std_dev(&p_samples);
@@ -431,6 +439,7 @@ fn process_iteration(
     // Run game simulation
     let res = game::start_game(
         20, mean_d, mean_p, mean_v, mean_dp, mean_pv, mean_cf, s_cf, s_d, s_p, s_v, s_dp, s_pv,
+        mean_p2, mean_v2, mean_p2v, mean_pv2, mean_p2v2,
     );
 
     let args = [

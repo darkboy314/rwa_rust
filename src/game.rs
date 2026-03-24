@@ -45,6 +45,13 @@ pub struct GameParams {
     pub sigma_dp: f64,
     /// Std dev of price-value
     pub sigma_pv: f64,
+
+    /// 2nd-order Expected value of P and V
+    pub e_p2: f64,
+    pub e_v2: f64,
+    pub e_p2v: f64,
+    pub e_pv2: f64,
+    pub e_p2v2: f64,
 }
 
 pub struct StageOnePlayer {
@@ -99,15 +106,16 @@ impl StageTwoPlayer {
     /// Profit function for stage two player
     pub fn mu(&self, m: f64, up: &UpstreamPlayer, params: &GameParams, m_others: &[f64]) -> f64 {
         let m_all = m_others.iter().sum::<f64>() + m + 1e-10;
-        let a = F * params.e_v + (m / m_all) * up.q * params.e_p - params.e_pv;
-        
-        T * a
-            - self.gma
-                * T
-                * ((F * params.sigma_v).powi(2) + ((m / m_all) * up.q * params.sigma_p).powi(2)
-                    - params.sigma_pv.powi(2))
-            - up.p2 * m
-            - C_T
+        let c = (m / m_all) * up.q;
+        let a = F * params.e_v + c * params.e_p - params.e_pv;
+        let b = F.powi(2) * params.e_v2
+            + 2.0 * F * c * params.e_pv
+            + c.powi(2) * params.e_p2
+            + params.e_p2v2
+            - 2.0 * F * params.e_p2v
+            - 2.0 * c * params.e_pv2;
+
+        T * a - self.gma * T * (b - a.powi(2)) - up.p2 * m - C_T
     }
 
     /// Constraint function
@@ -239,6 +247,11 @@ pub fn start_game(
     sigma_v: f64,
     sigma_dp: f64,
     sigma_pv: f64,
+    e_p2: f64,
+    e_v2: f64,
+    e_p2v: f64,
+    e_pv2: f64,
+    e_p2v2: f64,
 ) -> [f64; 20] {
     let params = GameParams {
         e_d,
@@ -253,6 +266,11 @@ pub fn start_game(
         sigma_v,
         sigma_dp,
         sigma_pv,
+        e_p2,
+        e_v2,
+        e_p2v,
+        e_pv2,
+        e_p2v2,
     };
 
     // initialize lower player
