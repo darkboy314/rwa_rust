@@ -5,20 +5,38 @@
 use argmin::core::{CostFunction, Error, Executor};
 use argmin::solver::brent::BrentOpt;
 use ndarray::{Array1, ArrayBase};
-use statrs::statistics::Statistics;
 
 pub const T: f64 = 15.0; // Lifespan years 
 pub const C_T: f64 = 100.0; // Transaction cost ($)
 pub const K: f64 = 600.0; // Development cost per unit ($/MWh)
-pub const F: f64 = 1000.0; // Sales price per unit ($/MWh)
+pub const F: f64 = 2000.0; // Sales price per unit ($/MWh)
+
+/// Compute mean without cloning.
+#[inline]
+fn mean(data: &Array1<f64>) -> f64 {
+    if data.is_empty() {
+        return 0.0;
+    }
+    data.sum() / data.len() as f64
+}
+
+/// Compute variance without cloning.
+#[inline]
+fn variance(data: &Array1<f64>) -> f64 {
+    if data.is_empty() {
+        return 0.0;
+    }
+    let m = mean(data);
+    data.iter().map(|x| (x - m).powi(2)).sum::<f64>() / data.len() as f64
+}
 // const Q: f64 = 200.0; // Storage capacity (MWh)
 // const R: f64 = 0.2; // Profit sharing ratio
 
 pub struct Samples {
-    pub d_samples: ArrayBase<ndarray::OwnedRepr<f64>, ndarray::Dim<[usize; 1]>>,
-    pub p_samples: ArrayBase<ndarray::OwnedRepr<f64>, ndarray::Dim<[usize; 1]>>,
-    pub v_samples: ArrayBase<ndarray::OwnedRepr<f64>, ndarray::Dim<[usize; 1]>>,
-    pub cf_samples: ArrayBase<ndarray::OwnedRepr<f64>, ndarray::Dim<[usize; 1]>>,
+    pub d_samples: Array1<f64>,
+    pub p_samples: Array1<f64>,
+    pub v_samples: Array1<f64>,
+    pub cf_samples: Array1<f64>,
 }
 
 pub struct ResultStruct {
@@ -56,16 +74,14 @@ impl StageOnePlayer {
         m_others: &[f64],
     ) -> f64 {
         let m_all = m + m_others.iter().sum::<f64>() + 1e-10;
-        let e_dp = (samples.d_samples.clone() * samples.p_samples.clone()).mean();
-        let e_cf = samples.cf_samples.clone().mean();
-        let var_cf = samples.cf_samples.clone().variance();
+
+        let dp_samples = &samples.d_samples * &samples.p_samples;
+        let e_dp = mean(&dp_samples);
+        let e_cf = mean(&samples.cf_samples);
+        let var_cf = variance(&samples.cf_samples);
 
         T * e_dp
-            + (m / m_all)
-                * up.r
-                * (up.p2 * m2
-                    - T * e_cf * up.q
-                    - self.lbd * T * var_cf * up.q)
+            + (m / m_all) * up.r * (up.p2 * m2 - T * e_cf * up.q - self.lbd * T * var_cf * up.q)
             - up.p1 * m
             - C_T
     }
@@ -85,9 +101,9 @@ impl StageTwoPlayer {
     pub fn mu(&self, m: f64, up: &UpstreamPlayer, samples: &Samples, m_others: &[f64]) -> f64 {
         let m_all = m_others.iter().sum::<f64>() + m + 1e-10;
         let c = (m / m_all) * up.q;
-        let x = F * samples.v_samples.clone() + (c - samples.v_samples.clone()) * samples.p_samples.clone();
-        let e_x = x.clone().mean();
-        let var_x = x.variance();
+        let x = F * &samples.v_samples + (c - &samples.v_samples) * &samples.p_samples;
+        let e_x = mean(&x);
+        let var_x = variance(&x);
 
         T * e_x - self.gma * T * var_x - up.p2 * m - C_T
     }
@@ -125,8 +141,8 @@ impl UpstreamPlayer {
         let r = self.r;
         let p1 = self.p1;
         let p2 = self.p2;
-        let e_cf = samples.cf_samples.clone().mean();
-        
+        let e_cf = mean(&samples.cf_samples);
+
         p1 * m1 + (1.0 - r) * (p2 * m2 - T * q * e_cf)
             - (self.n_re + self.n_of) as f64 * C_T
             - K * q
@@ -200,7 +216,7 @@ where
 pub fn penalty_function(up: &UpstreamPlayer, samples: &Samples, result: &ResultStruct) -> f64 {
     let m1 = result.reg1_m + result.reg2_m;
     let m2 = result.oft1_m + result.oft2_m;
-    let e_cf = samples.cf_samples.clone().mean();
+    let e_cf = mean(&samples.cf_samples);
 
     let a = up.cons_1(m1).min(0.0);
     let b = up.cons_2(m2, e_cf).min(0.0);
@@ -294,7 +310,7 @@ pub fn start_game(
     let m2_final = final_result.oft1_m + final_result.oft2_m;
 
     let cons_1 = up_final.cons_1(m1_final);
-    let cons_2 = up_final.cons_2(m2_final, samples.cf_samples.clone().mean());
+    let cons_2 = up_final.cons_2(m2_final, mean(&samples.cf_samples));
     let cons_3 = up_final.cons_3(m2_final);
 
     let theta1 = reg1.theta(
