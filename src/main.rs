@@ -2,13 +2,13 @@ mod distribution;
 mod ga;
 mod game;
 mod plotting;
-mod utils;
 
 use chrono::Local;
 use csv::Writer;
 use mimalloc::MiMalloc;
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
+use statrs::statistics::Statistics;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -92,8 +92,8 @@ fn main() {
 
     // Create CSV headers
     let headers = vec![
-        "T", "c_t", "k", "f", "E_D", "E_P", "E_V", "E_DP", "E_PV", "E_cf", "sigma_D", "sigma_P",
-        "sigma_V", "sigma_DP", "sigma_PV", "sigma_cf", "m11", "lambda1", "theta1", "m12",
+        "T", "c_t", "k", "f", "E_D", "E_P", "E_V", "E_cf", "Var_D", "Var_P",
+        "Var_V", "Var_cf", "m11", "lambda1", "theta1", "m12",
         "lambda2", "theta2", "m21", "gamma1", "mu1", "m22", "gamma2", "mu2", "q", "r", "p1", "p2",
         "cons_1", "cons_2", "cons_3", "pi",
     ];
@@ -104,7 +104,7 @@ fn main() {
     let e_v = 100.0;
 
     let var_d = 3.0;
-    let var_p = 1.0;
+    let var_p = 2.0;
     let var_v = 2.0;
 
     let (mu_d, sigma_d) = distribution::lognormal_params_from_mean_var(e_d, var_d);
@@ -115,7 +115,7 @@ fn main() {
     let rho_pv = 0.3;
     let rho_dv = 0.2;
 
-    let e_cf = 5.0;
+    let e_cf = 60.0;
     let var_cf = 10.0;
 
     // Build covariance matrix
@@ -408,39 +408,21 @@ fn process_iteration(
     cov: &[Vec<f64>],
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     // Generate samples
-    let cf = distribution::operation_cost_gamma(100, e_cf, var_cf, Some(0));
+    let cf_samples = distribution::operation_cost_gamma(100, e_cf, var_cf, None);
     let (d_samples, p_samples, v_samples) =
-        distribution::sample_multivariate_lognormal(100, mean, cov, Some(0));
-    let dp_samples = utils::elementwise_mul(&d_samples, &p_samples);
-    let pv_samples = utils::elementwise_mul(&p_samples, &v_samples);
-
-    // Calculate statistics
-    let mean_d = utils::mean(&d_samples);
-    let mean_p = utils::mean(&p_samples);
-    let mean_v = utils::mean(&v_samples);
-    let mean_dp = utils::mean(&dp_samples);
-    let mean_pv = utils::mean(&pv_samples);
-
-    let mean_p2 = utils::mean(&utils::elementwise_mul(&p_samples, &p_samples));
-    let mean_v2 = utils::mean(&utils::elementwise_mul(&v_samples, &v_samples));
-    let mean_p2v = utils::mean(&utils::elementwise_mul(&pv_samples, &p_samples));
-    let mean_pv2 = utils::mean(&utils::elementwise_mul(&pv_samples, &v_samples));
-    let mean_p2v2 = utils::mean(&utils::elementwise_mul(&pv_samples, &pv_samples));
-
-    let s_d = utils::std_dev(&d_samples);
-    let s_p = utils::std_dev(&p_samples);
-    let s_v = utils::std_dev(&v_samples);
-    let s_dp = utils::std_dev(&utils::elementwise_mul(&d_samples, &p_samples));
-    let s_pv = utils::std_dev(&utils::elementwise_mul(&p_samples, &v_samples));
-
-    let mean_cf = utils::mean(&cf);
-    let s_cf = utils::std_dev(&cf);
+        distribution::sample_multivariate_lognormal(100, mean, cov, None);
 
     // Run game simulation
-    let res = game::start_game(
-        20, mean_d, mean_p, mean_v, mean_dp, mean_pv, mean_cf, s_cf, s_d, s_p, s_v, s_dp, s_pv,
-        mean_p2, mean_v2, mean_p2v, mean_pv2, mean_p2v2,
-    );
+    let res = game::start_game(100, &d_samples, &p_samples, &v_samples, &cf_samples);
+
+    let mean_d = d_samples.clone().mean();
+    let mean_p = p_samples.clone().mean();
+    let mean_v = v_samples.clone().mean();
+    let mean_cf = cf_samples.clone().mean();
+    let var_d = d_samples.clone().variance();
+    let var_p = p_samples.clone().variance();
+    let var_v = v_samples.clone().variance();
+    let var_cf = cf_samples.clone().variance();
 
     let args = [
         game::T,
@@ -450,18 +432,14 @@ fn process_iteration(
         mean_d,
         mean_p,
         mean_v,
-        mean_dp,
-        mean_pv,
         mean_cf,
-        s_d,
-        s_p,
-        s_v,
-        s_dp,
-        s_pv,
-        s_cf,
+        var_d,
+        var_p,
+        var_v,
+        var_cf,
     ];
 
     let result_data = [&args[..], &res[..]].concat();
 
-    (result_data, p_samples, cf)
+    (result_data, p_samples, cf_samples)
 }

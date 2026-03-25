@@ -2,6 +2,13 @@ use rand::{Rng, RngExt};
 use rayon::prelude::*;
 use std::cmp::Ordering;
 
+struct EvaluatedIndividual {
+    individual: Vec<f64>,
+    objective: f64,
+    total_penalty: f64,
+    score: f64,
+}
+
 /// Genetic Algorithm implementation
 pub struct GA {
     pop_size: usize,
@@ -19,16 +26,14 @@ impl GA {
     }
 
     /// Run genetic algorithm
-    pub fn run<F, P>(
+    pub fn run<F>(
         &self,
-        obj_func: F,
-        penalty_func: Option<P>,
+        eval_func: F,
         p_range: &[(f64, f64)],
         m_range: &[(f64, f64)],
     ) -> (Vec<f64>, f64)
     where
-        F: Fn(&[f64]) -> f64 + Sync + Send,
-        P: Fn(&[f64]) -> f64 + Sync + Send,
+        F: Fn(&[f64]) -> (f64, f64) + Sync + Send,
     {
         let mut rng = rand::rng();
 
@@ -43,54 +48,65 @@ impl GA {
             // Combine and evaluate
             population.extend(offspring);
 
-            let mut scored_population: Vec<(Vec<f64>, f64)> = population
+            let mut scored_population: Vec<EvaluatedIndividual> = population
                 .into_par_iter()
                 .map(|individual| {
-                    let penalty = self.penalty_function(&individual, p_range);
-                    let obj = obj_func(&individual);
-                    let p_penalty = if let Some(p_func) = penalty_func.as_ref() {
-                        p_func(&individual)
-                    } else {
-                        0.0
-                    };
+                    let bound_penalty = self.penalty_function(&individual, p_range);
+                    let (objective, external_penalty) = eval_func(&individual);
+                    let total_penalty = bound_penalty + external_penalty.max(0.0);
+                    let score = 2000.0 - objective - total_penalty;
 
-                    (individual, 2000.0 - obj - penalty - p_penalty)
+                    EvaluatedIndividual {
+                        individual,
+                        objective,
+                        total_penalty,
+                        score,
+                    }
                 })
                 .collect();
 
             scored_population
-                .sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+                .sort_unstable_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
             scored_population.truncate(self.pop_size);
 
             population = scored_population
                 .into_iter()
-                .map(|(individual, _)| individual)
+                .map(|e| e.individual)
                 .collect();
         }
 
-        // Return best individual
-        let best = population.swap_remove(0);
+        // Final screening: strictly discard infeasible candidates.
+        let final_evaluated: Vec<EvaluatedIndividual> = population
+            .into_par_iter()
+            .map(|individual| {
+                let bound_penalty = self.penalty_function(&individual, p_range);
+                let (objective, external_penalty) = eval_func(&individual);
+                let total_penalty = bound_penalty + external_penalty.max(0.0);
+                let score = 2000.0 - objective - total_penalty;
 
-        // Check if penalty function is violated (constraint check)
-        // Using a small epsilon for numerical stability
-        // let epsilon_constraint: f64 = 1e-6;
-        // if let Some(p_func) = penalty_func {
-        //     if p_func(&best) > epsilon_constraint {
-        //         let nan_vec = vec![f64::NAN; best.len()];
-        //         return (nan_vec, f64::NAN);
-        //     }
-        // }
+                EvaluatedIndividual {
+                    individual,
+                    objective,
+                    total_penalty,
+                    score,
+                }
+            })
+            .collect();
 
-        // Check if bounds are violated (boundary check)
-        // let epsilon_bound: f64 = 1e-6;
-        // let bound_penalty = self.penalty_function(&best, p_range);
-        // if bound_penalty > epsilon_bound {
-        //     let nan_vec = vec![f64::NAN; best.len()];
-        //     return (nan_vec, f64::NAN);
-        // }
+        let best = final_evaluated
+            .iter()
+            .filter(|e| e.total_penalty <= 0.0)
+            .min_by(|a, b| {
+                a.objective
+                    .partial_cmp(&b.objective)
+                    .unwrap_or(Ordering::Equal)
+            });
 
-        let best_fitness = obj_func(&best);
-        (best, best_fitness)
+        if let Some(e) = best {
+            (e.individual.clone(), e.objective)
+        } else {
+            (vec![f64::NAN; p_range.len()], f64::NAN)
+        }
     }
 
     fn generate_random_population(
@@ -183,7 +199,7 @@ mod tests {
 
         let mut best_value = f64::INFINITY;
         for _ in 0..10 {
-            let (_best_x, value) = ga.run(eggholder, None::<fn(&[f64]) -> f64>, &p_range, &m_range);
+            let (_best_x, value) = ga.run(|x| (eggholder(x), 0.0), &p_range, &m_range);
             if value < best_value {
                 best_value = value;
             }
