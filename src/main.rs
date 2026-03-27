@@ -2,13 +2,14 @@ mod distribution;
 mod ga;
 mod game;
 mod plotting;
+mod stats;
 
 use chrono::Local;
 use csv::Writer;
 use mimalloc::MiMalloc;
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
-use statrs::statistics::Statistics;
+use stats::{mean as sample_mean, variance as sample_variance};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -32,6 +33,40 @@ struct RunningStats {
 #[derive(Clone, Debug)]
 struct RunConfig {
     worker_count: usize,
+}
+
+struct OutputPaths {
+    output_dir: String,
+    timestamped_csv: String,
+    global_csv: String,
+}
+
+struct SimulationParams {
+    headers: Vec<&'static str>,
+    mean: Vec<f64>,
+    cov: Vec<Vec<f64>>,
+    mu_p: f64,
+    sigma_p: f64,
+    e_cf: f64,
+    var_cf: f64,
+    total_iterations: usize,
+}
+
+struct SharedState {
+    writers: Arc<Mutex<(Writer<std::fs::File>, Writer<std::fs::File>)>>,
+    stats: Arc<Mutex<Vec<RunningStats>>>,
+    thread_status: Arc<Vec<AtomicUsize>>,
+    completed_count: Arc<AtomicUsize>,
+    stop_progress: Arc<AtomicBool>,
+    skipped_figure_count: Arc<AtomicUsize>,
+    csv_error_count: Arc<AtomicUsize>,
+    plot_error_count: Arc<AtomicUsize>,
+}
+
+struct FinalCounts {
+    skipped_figures: usize,
+    csv_errors: usize,
+    plot_errors: usize,
 }
 
 impl RunningStats {
@@ -72,37 +107,73 @@ impl RunningStats {
 
 fn main() {
     let run_config = parse_run_config();
-    let worker_count = run_config.worker_count;
+    configure_thread_pool(run_config.worker_count);
+
+    let start = std::time::Instant::now();
+    let output_paths = create_output_paths();
+    let simulation = build_simulation_params();
+    let total_iterations = simulation.total_iterations;
+    println!(
+        "Starting RWA simulation with {} iterations...",
+        total_iterations
+    );
+    let shared =
+        initialize_shared_state(&output_paths, &simulation.headers, run_config.worker_count);
+    let reporter = start_progress_reporter(
+        Arc::clone(&shared.thread_status),
+        Arc::clone(&shared.completed_count),
+        Arc::clone(&shared.stop_progress),
+        run_config.worker_count,
+        total_iterations,
+    );
+
+    run_simulation(&simulation, &output_paths, &shared);
+
+    stop_progress_reporter(shared.stop_progress.as_ref(), reporter);
+    flush_writers(&shared.writers);
+
+    let final_counts = collect_final_counts(&shared);
+    print_run_summary(
+        &output_paths,
+        &simulation.headers,
+        total_iterations,
+        &shared.stats,
+        &final_counts,
+        start.elapsed(),
+    );
+}
+
+fn configure_thread_pool(worker_count: usize) {
     ThreadPoolBuilder::new()
         .num_threads(worker_count)
         .build_global()
         .unwrap_or_else(|e| panic!("Failed to configure Rayon thread pool: {}", e));
+}
 
-    let start = std::time::Instant::now();
-
-    // Create output directory with timestamp
+fn create_output_paths() -> OutputPaths {
     let timestamp = Local::now().format("%Y-%m-%d %H-%M-%S").to_string();
     let output_dir = format!("./output/{}", timestamp);
+    fs::create_dir_all("./output").expect("Failed to create output dir");
     fs::create_dir_all(format!("{}/figure-1", output_dir)).expect("Failed to create figure-1 dir");
     fs::create_dir_all(format!("{}/figure-2", output_dir)).expect("Failed to create figure-2 dir");
-    fs::create_dir_all("./output").expect("Failed to create output dir");
 
-    let filename = format!("{}/result.csv", output_dir);
-    let global_filename = "./output/result.csv".to_string();
+    OutputPaths {
+        timestamped_csv: format!("{}/result.csv", output_dir),
+        global_csv: "./output/result.csv".to_string(),
+        output_dir,
+    }
+}
 
-    // Create CSV headers
+fn build_simulation_params() -> SimulationParams {
     let headers = vec![
-        "T", "c_t", "k", "f", "E_D", "E_P", "E_V", "E_cf", "Var_D", "Var_P",
-        "Var_V", "Var_cf", "m11", "lambda1", "theta1", "m12",
-        "lambda2", "theta2", "m21", "gamma1", "mu1", "m22", "gamma2", "mu2", "q", "r", "p1", "p2",
-        "cons_1", "cons_2", "cons_3", "pi",
+        "T", "c_t", "k", "f", "E_D", "E_P", "E_V", "E_cf", "Var_D", "Var_P", "Var_V", "Var_cf",
+        "m11", "lambda1", "theta1", "m12", "lambda2", "theta2", "m21", "gamma1", "mu1", "m22",
+        "gamma2", "mu2", "q", "r", "p1", "p2", "cons_1", "cons_2", "cons_3", "pi",
     ];
 
-    // Market parameters
     let e_d = 100.0;
     let e_p = 1400.0;
     let e_v = 100.0;
-
     let var_d = 3.0;
     let var_p = 2.0;
     let var_v = 2.0;
@@ -114,11 +185,9 @@ fn main() {
     let rho_dp = 0.5;
     let rho_pv = 0.3;
     let rho_dv = 0.2;
-
     let e_cf = 60.0;
     let var_cf = 10.0;
 
-    // Build covariance matrix
     let mean = vec![mu_d, mu_p, mu_v];
     let cov = vec![
         vec![
@@ -138,65 +207,79 @@ fn main() {
         ],
     ];
 
-    let total_iterations = 100usize;
-    println!(
-        "Starting RWA simulation with {} iterations...",
-        total_iterations
-    );
+    SimulationParams {
+        headers,
+        mean,
+        cov,
+        mu_p,
+        sigma_p,
+        e_cf,
+        var_cf,
+        total_iterations: 100,
+    }
+}
 
-    // Shared CSV writers (timestamped + global), write header once
+fn initialize_shared_state(
+    output_paths: &OutputPaths,
+    headers: &[&str],
+    worker_count: usize,
+) -> SharedState {
     let writers = Arc::new(Mutex::new((
-        Writer::from_path(&filename).expect("Failed to open timestamped CSV"),
-        Writer::from_path(&global_filename).expect("Failed to open global CSV"),
+        Writer::from_path(&output_paths.timestamped_csv).expect("Failed to open timestamped CSV"),
+        Writer::from_path(&output_paths.global_csv).expect("Failed to open global CSV"),
     )));
     {
         let mut guard = writers.lock().expect("Failed to lock writers");
         guard
             .0
-            .write_record(&headers)
+            .write_record(headers)
             .expect("Failed to write timestamped CSV header");
         guard
             .1
-            .write_record(&headers)
+            .write_record(headers)
             .expect("Failed to write global CSV header");
     }
 
-    // Running stats (no full in-memory results)
-    let stats = Arc::new(Mutex::new(vec![RunningStats::new(); headers.len()]));
+    SharedState {
+        writers,
+        stats: Arc::new(Mutex::new(vec![RunningStats::new(); headers.len()])),
+        thread_status: Arc::new(
+            (0..worker_count)
+                .map(|_| AtomicUsize::new(0))
+                .collect::<Vec<_>>(),
+        ),
+        completed_count: Arc::new(AtomicUsize::new(0)),
+        stop_progress: Arc::new(AtomicBool::new(false)),
+        skipped_figure_count: Arc::new(AtomicUsize::new(0)),
+        csv_error_count: Arc::new(AtomicUsize::new(0)),
+        plot_error_count: Arc::new(AtomicUsize::new(0)),
+    }
+}
 
-    // Progress
-    let thread_status = Arc::new(
-        (0..worker_count)
-            .map(|_| AtomicUsize::new(0))
-            .collect::<Vec<_>>(),
-    );
-    let completed_count = Arc::new(AtomicUsize::new(0));
-    let stop_progress = Arc::new(AtomicBool::new(false));
-
-    let skipped_figure_count = Arc::new(AtomicUsize::new(0));
-    let csv_error_count = Arc::new(AtomicUsize::new(0));
-    let plot_error_count = Arc::new(AtomicUsize::new(0));
-
+fn start_progress_reporter(
+    thread_status: Arc<Vec<AtomicUsize>>,
+    completed_count: Arc<AtomicUsize>,
+    stop_progress: Arc<AtomicBool>,
+    worker_count: usize,
+    total_iterations: usize,
+) -> thread::JoinHandle<()> {
     let progress_lines = worker_count + 1;
     println!("Overall progress: 0/{}", total_iterations);
     for tid in 0..worker_count {
         println!("Thread {:02}: idle", tid);
     }
 
-    let reporter_status = Arc::clone(&thread_status);
-    let reporter_completed = Arc::clone(&completed_count);
-    let reporter_stop = Arc::clone(&stop_progress);
-    let reporter = Some(thread::spawn(move || {
+    thread::spawn(move || {
         let mut stdout = io::stdout();
 
         loop {
             print!("\x1B[{}A", progress_lines);
 
-            let done = reporter_completed.load(Ordering::Relaxed);
+            let done = completed_count.load(Ordering::Relaxed);
             print!("\x1B[2K\rOverall progress: {}/{}\n", done, total_iterations);
 
             for tid in 0..worker_count {
-                let current = reporter_status[tid].load(Ordering::Relaxed);
+                let current = thread_status[tid].load(Ordering::Relaxed);
                 if current == 0 {
                     print!("\x1B[2K\rThread {:02}: idle\n", tid);
                 } else {
@@ -209,127 +292,192 @@ fn main() {
 
             let _ = stdout.flush();
 
-            if reporter_stop.load(Ordering::Relaxed) {
+            if stop_progress.load(Ordering::Relaxed) {
                 break;
             }
 
             thread::sleep(Duration::from_millis(120));
         }
-    }));
+    })
+}
 
-    let worker_status = Arc::clone(&thread_status);
-    let worker_completed = Arc::clone(&completed_count);
-    let worker_writers = Arc::clone(&writers);
-    let worker_stats = Arc::clone(&stats);
-    let worker_skipped = Arc::clone(&skipped_figure_count);
-    let worker_csv_err = Arc::clone(&csv_error_count);
-    let worker_plot_err = Arc::clone(&plot_error_count);
-
-    // Stream processing: compute -> write -> plot, per iteration
-    let run_iteration = |i: usize, thread_id: Option<usize>| {
-        if let Some(tid) = thread_id {
-            worker_status[tid].store(i + 1, Ordering::Relaxed);
-        }
-
-        let (result_data, price_sample, cost_sample) = process_iteration(e_cf, var_cf, &mean, &cov);
-
-        // Update running stats
-        if let Ok(mut s) = worker_stats.lock() {
-            for (j, value) in result_data.iter().enumerate() {
-                if let Some(col) = s.get_mut(j) {
-                    col.update(*value);
-                }
-            }
-        }
-
-        // Write CSV row immediately and flush to disk so data survives interrupts
-        let row_str: Vec<String> = result_data.iter().map(|v| v.to_string()).collect();
-        match worker_writers.lock() {
-            Ok(mut w) => {
-                let write_ok = w.0.write_record(&row_str).is_ok()
-                    && w.0.flush().is_ok()
-                    && w.1.write_record(&row_str).is_ok()
-                    && w.1.flush().is_ok();
-                if !write_ok {
-                    worker_csv_err.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            Err(_) => {
-                worker_csv_err.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-
-        // Plot immediately
-        let q = result_data[28];
-        let r = result_data[29];
-        let p1 = result_data[30];
-        let p2 = result_data[31];
-
-        if !(q.is_finite() && r.is_finite() && p1.is_finite() && p2.is_finite()) {
-            worker_skipped.fetch_add(1, Ordering::Relaxed);
-        } else if plotting::save_iteration_figures(
-            i,
-            &price_sample,
-            &cost_sample,
-            mu_p,
-            sigma_p,
-            e_cf,
-            var_cf,
-            &output_dir,
-        )
-        .is_err()
-        {
-            worker_plot_err.fetch_add(1, Ordering::Relaxed);
-        }
-
-        worker_completed.fetch_add(1, Ordering::Relaxed);
-    };
-
-    (0..total_iterations)
+fn run_simulation(simulation: &SimulationParams, output_paths: &OutputPaths, shared: &SharedState) {
+    (0..simulation.total_iterations)
         .into_par_iter()
-        .for_each(|i| run_iteration(i, rayon::current_thread_index()));
+        .for_each(|i| {
+            run_iteration(
+                i,
+                rayon::current_thread_index(),
+                simulation,
+                output_paths,
+                shared,
+            )
+        });
+}
 
-    stop_progress.store(true, Ordering::Relaxed);
-    if let Some(handle) = reporter {
-        let _ = handle.join();
-        println!();
+fn run_iteration(
+    iteration: usize,
+    thread_id: Option<usize>,
+    simulation: &SimulationParams,
+    output_paths: &OutputPaths,
+    shared: &SharedState,
+) {
+    if let Some(tid) = thread_id {
+        shared.thread_status[tid].store(iteration + 1, Ordering::Relaxed);
     }
 
-    // Flush CSV
-    if let Ok(mut w) = writers.lock() {
-        if w.0.flush().is_err() || w.1.flush().is_err() {
+    let (result_data, price_sample, cost_sample) = process_iteration(
+        simulation.e_cf,
+        simulation.var_cf,
+        &simulation.mean,
+        &simulation.cov,
+    );
+
+    update_running_stats(&shared.stats, &result_data);
+    write_result_row(&shared.writers, &result_data, &shared.csv_error_count);
+    save_iteration_plot(
+        iteration,
+        &result_data,
+        &price_sample,
+        &cost_sample,
+        simulation,
+        output_paths,
+        &shared.skipped_figure_count,
+        &shared.plot_error_count,
+    );
+
+    shared.completed_count.fetch_add(1, Ordering::Relaxed);
+}
+
+fn update_running_stats(stats: &Arc<Mutex<Vec<RunningStats>>>, result_data: &[f64]) {
+    if let Ok(mut guard) = stats.lock() {
+        for (index, value) in result_data.iter().enumerate() {
+            if let Some(column) = guard.get_mut(index) {
+                column.update(*value);
+            }
+        }
+    }
+}
+
+fn write_result_row(
+    writers: &Arc<Mutex<(Writer<std::fs::File>, Writer<std::fs::File>)>>,
+    result_data: &[f64],
+    csv_error_count: &Arc<AtomicUsize>,
+) {
+    let row: Vec<String> = result_data.iter().map(|value| value.to_string()).collect();
+    match writers.lock() {
+        Ok(mut guard) => {
+            let write_ok = guard.0.write_record(&row).is_ok()
+                && guard.0.flush().is_ok()
+                && guard.1.write_record(&row).is_ok()
+                && guard.1.flush().is_ok();
+            if !write_ok {
+                csv_error_count.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        Err(_) => {
+            csv_error_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+fn save_iteration_plot(
+    iteration: usize,
+    result_data: &[f64],
+    price_sample: &[f64],
+    cost_sample: &[f64],
+    simulation: &SimulationParams,
+    output_paths: &OutputPaths,
+    skipped_figure_count: &Arc<AtomicUsize>,
+    plot_error_count: &Arc<AtomicUsize>,
+) {
+    let q = result_data[28];
+    let r = result_data[29];
+    let p1 = result_data[30];
+    let p2 = result_data[31];
+
+    if !(q.is_finite() && r.is_finite() && p1.is_finite() && p2.is_finite()) {
+        skipped_figure_count.fetch_add(1, Ordering::Relaxed);
+    } else if plotting::save_iteration_figures(
+        iteration,
+        price_sample,
+        cost_sample,
+        simulation.mu_p,
+        simulation.sigma_p,
+        simulation.e_cf,
+        simulation.var_cf,
+        &output_paths.output_dir,
+    )
+    .is_err()
+    {
+        plot_error_count.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn stop_progress_reporter(stop_progress: &AtomicBool, reporter: thread::JoinHandle<()>) {
+    stop_progress.store(true, Ordering::Relaxed);
+    let _ = reporter.join();
+    println!();
+}
+
+fn flush_writers(writers: &Arc<Mutex<(Writer<std::fs::File>, Writer<std::fs::File>)>>) {
+    if let Ok(mut guard) = writers.lock() {
+        if guard.0.flush().is_err() || guard.1.flush().is_err() {
             println!("Warning: failed to flush CSV writers.");
         }
     }
+}
 
-    println!("Global results also saved to {}", global_filename);
-    println!("Figure 1 files saved to {}/figure-1", output_dir);
-    println!("Figure 2 files saved to {}/figure-2", output_dir);
+fn collect_final_counts(shared: &SharedState) -> FinalCounts {
+    FinalCounts {
+        skipped_figures: shared.skipped_figure_count.load(Ordering::Relaxed),
+        csv_errors: shared.csv_error_count.load(Ordering::Relaxed),
+        plot_errors: shared.plot_error_count.load(Ordering::Relaxed),
+    }
+}
+
+fn print_run_summary(
+    output_paths: &OutputPaths,
+    headers: &[&str],
+    total_iterations: usize,
+    stats: &Arc<Mutex<Vec<RunningStats>>>,
+    final_counts: &FinalCounts,
+    elapsed: Duration,
+) {
+    println!("Global results also saved to {}", output_paths.global_csv);
+    println!(
+        "Figure 1 files saved to {}/figure-1",
+        output_paths.output_dir
+    );
+    println!(
+        "Figure 2 files saved to {}/figure-2",
+        output_paths.output_dir
+    );
     println!(
         "Skipped figure generation for {} iterations due to unsolved q/r/p1/p2",
-        skipped_figure_count.load(Ordering::Relaxed)
+        final_counts.skipped_figures
     );
 
-    let csv_err = csv_error_count.load(Ordering::Relaxed);
-    if csv_err > 0 {
-        println!("Warning: {} iterations failed to write CSV rows.", csv_err);
-    }
-
-    let plot_err = plot_error_count.load(Ordering::Relaxed);
-    if plot_err > 0 {
+    if final_counts.csv_errors > 0 {
         println!(
-            "Warning: {} iterations failed to generate figures.",
-            plot_err
+            "Warning: {} iterations failed to write CSV rows.",
+            final_counts.csv_errors
         );
     }
 
-    // Print summary statistics from running stats
-    if let Ok(s) = stats.lock() {
-        print_summary_statistics(&s, &headers, total_iterations);
+    if final_counts.plot_errors > 0 {
+        println!(
+            "Warning: {} iterations failed to generate figures.",
+            final_counts.plot_errors
+        );
     }
 
-    println!("Results saved to {}", filename);
-    println!("Total time: {:?}", start.elapsed());
+    if let Ok(guard) = stats.lock() {
+        print_summary_statistics(&guard, headers, total_iterations);
+    }
+
+    println!("Results saved to {}", output_paths.timestamped_csv);
+    println!("Total time: {:?}", elapsed);
 }
 
 fn parse_run_config() -> RunConfig {
@@ -415,14 +563,14 @@ fn process_iteration(
     // Run game simulation
     let res = game::start_game(100, &d_samples, &p_samples, &v_samples, &cf_samples);
 
-    let mean_d = d_samples.clone().mean();
-    let mean_p = p_samples.clone().mean();
-    let mean_v = v_samples.clone().mean();
-    let mean_cf = cf_samples.clone().mean();
-    let var_d = d_samples.clone().variance();
-    let var_p = p_samples.clone().variance();
-    let var_v = v_samples.clone().variance();
-    let var_cf = cf_samples.clone().variance();
+    let mean_d = sample_mean(&d_samples);
+    let mean_p = sample_mean(&p_samples);
+    let mean_v = sample_mean(&v_samples);
+    let mean_cf = sample_mean(&cf_samples);
+    let var_d = sample_variance(&d_samples, mean_d);
+    let var_p = sample_variance(&p_samples, mean_p);
+    let var_v = sample_variance(&v_samples, mean_v);
+    let var_cf = sample_variance(&cf_samples, mean_cf);
 
     let args = [
         game::T,
